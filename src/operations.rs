@@ -341,6 +341,29 @@ pub async fn format_whole_disk(
 
     validate_device_name(disk)?;
 
+    let cmd = match fs_type {
+        FilesystemType::Ext4 => "mkfs.ext4",
+        FilesystemType::Fat32 => "mkfs.fat",
+        FilesystemType::Ntfs => "mkfs.ntfs",
+        FilesystemType::Exfat => "mkfs.exfat",
+        FilesystemType::Btrfs => "mkfs.btrfs",
+        FilesystemType::Xfs => "mkfs.xfs",
+    };
+
+    let check_cmd = Command::new("which")
+        .arg(cmd)
+        .output()
+        .await;
+
+    if check_cmd.is_err() || !check_cmd.unwrap().status.success() {
+        Notification::send(
+            format!("Formatting tool '{}' not found. Install the required package.", cmd),
+            NotificationLevel::Error,
+            &sender,
+        )?;
+        return Err(anyhow!("Command not found: {}", cmd));
+    }
+
     sender.send(Event::StartProgress(format!("Formatting {} as whole disk...", disk)))?;
 
     sender.send(Event::UpdateProgress(ProgressDetails {
@@ -462,15 +485,6 @@ pub async fn format_partition(
         return Err(anyhow!("Partition is mounted"));
     }
 
-    sender.send(Event::StartProgress(format!("Formatting {} as {}...", partition, fs_type.as_str())))?;
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 0,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-
     let device_path = format!("/dev/{}", partition);
 
     let (cmd, args): (&str, Vec<&str>) = match fs_type {
@@ -482,6 +496,29 @@ pub async fn format_partition(
         FilesystemType::Xfs => ("mkfs.xfs", vec!["-f", &device_path]),
     };
 
+    let check_cmd = Command::new("which")
+        .arg(cmd)
+        .output()
+        .await;
+
+    if check_cmd.is_err() || !check_cmd.unwrap().status.success() {
+        Notification::send(
+            format!("Formatting tool '{}' not found. Install the required package.", cmd),
+            NotificationLevel::Error,
+            &sender,
+        )?;
+        return Err(anyhow!("Command not found: {}", cmd));
+    }
+
+    sender.send(Event::StartProgress(format!("Formatting {} as {}...", partition, fs_type.as_str())))?;
+    sender.send(Event::UpdateProgress(ProgressDetails {
+        percentage: 0,
+        bytes_written: 0,
+        total_bytes: 0,
+        speed_mbps: 0.0,
+        elapsed_seconds: 0,
+    }))?;
+
     sender.send(Event::UpdateProgress(ProgressDetails {
         percentage: 25,
         bytes_written: 0,
@@ -490,11 +527,22 @@ pub async fn format_partition(
         elapsed_seconds: 0,
     }))?;
 
-    let output = Command::new(cmd)
+    let output = match Command::new(cmd)
         .args(&args)
         .output()
         .await
-        .context(format!("Failed to execute {}", cmd))?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            sender.send(Event::EndProgress)?;
+            Notification::send(
+                format!("Failed to execute {}: {}", cmd, e),
+                NotificationLevel::Error,
+                &sender,
+            )?;
+            return Err(anyhow!("Failed to execute {}", cmd));
+        }
+    };
 
     sender.send(Event::UpdateProgress(ProgressDetails {
         percentage: 100,
