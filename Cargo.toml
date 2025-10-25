@@ -1,20 +1,27 @@
 [package]
 name = "disktui"
-version = "0.1.0"
-edition = "2021"
+version = "1.0.0"
+edition = "2024"
+authors = ["Maciej <macrionyn@proton.me>"]
+description = "A terminal-based disk management utility built with Rust and Ratatui"
+license = "MIT"
+repository = "https://github.com/Maciejonos/disktui"
+readme = "README.md"
+keywords = ["tui", "disk", "partition", "cli", "terminal"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ratatui = "0.29"
-crossterm = { version = "0.29", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "0.9"
 anyhow = "1"
 futures = "0.3"
 serde_json = "1"
-tui-input = "0.12"
+tui-input = "0.14"
 libc = "0.2"
-dirs = "5"
+dirs = "6"
 
 [profile.release]
 strip = true
