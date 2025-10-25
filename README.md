@@ -3,7 +3,7 @@
 </div>
 
 ## Demo
-![disktui](https://github.com/user-attachments/assets/dbda4e09-6309-441f-8c60-fd064e262ba8)
+https://github.com/user-attachments/assets/008a5704-6f5e-4f94-8abe-fadc68e091fb
 
 ## 💡 Prerequisites
 
