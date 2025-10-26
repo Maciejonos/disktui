@@ -3,7 +3,7 @@
 </div>
 
 ## Demo
-https://github.com/user-attachments/assets/d372dc6d-153d-47d1-b482-ff5c1a4b87b8
+https://github.com/user-attachments/assets/841aec6a-0d4b-4738-a637-a3a27469348e
 
 ## 💡 Prerequisites
 
