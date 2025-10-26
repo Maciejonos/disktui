@@ -1,6 +1,6 @@
 [package]
 name = "disktui"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2024"
 authors = ["Maciej <macrionyn@proton.me>"]
 description = "A terminal-based disk management utility built with Rust and Ratatui"

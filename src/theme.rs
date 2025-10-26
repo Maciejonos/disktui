@@ -24,10 +24,6 @@ pub struct Theme {
     pub partition_label_width: u16,
     pub partition_usage_min_width: u16,
 
-    pub error_ttl: u16,
-    pub warning_ttl: u16,
-    pub info_ttl: u16,
-
     pub usage_bar_filled: &'static str,
     pub usage_bar_empty: &'static str,
     pub usage_bar_length: u8,
@@ -57,10 +53,6 @@ impl Default for Theme {
             partition_mount_width: 20,
             partition_label_width: 15,
             partition_usage_min_width: 40,
-
-            error_ttl: 5,
-            warning_ttl: 3,
-            info_ttl: 2,
 
             usage_bar_filled: "|",
             usage_bar_empty: "-",

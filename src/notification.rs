@@ -67,9 +67,9 @@ impl Notification {
         sender: &UnboundedSender<Event>,
     ) -> AppResult<()> {
         let ttl = match level {
-            NotificationLevel::Error => 5,
-            NotificationLevel::Warning => 3,
-            NotificationLevel::Info => 2,
+            NotificationLevel::Error => 100,
+            NotificationLevel::Warning => 60,
+            NotificationLevel::Info => 40,
         };
 
         let notif = Notification {
