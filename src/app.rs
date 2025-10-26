@@ -1,13 +1,61 @@
-use std::sync::{Arc, atomic::AtomicBool};
-use ratatui::widgets::{TableState, ListState};
-use tui_input::Input;
 use crate::disk::Disk;
 use crate::notification::Notification;
-use crate::operations::{list_block_devices, get_smart_data, FilesystemType};
+use crate::operations::{FilesystemType, get_smart_data, list_block_devices};
 use crate::theme::Theme;
 use anyhow::Result;
+use ratatui::widgets::{ListState, TableState};
+use std::sync::{Arc, atomic::AtomicBool};
+use tui_input::Input;
 
 pub type AppResult<T> = Result<T>;
+
+#[derive(Debug, Clone)]
+pub enum ConfirmationOperation {
+    None,
+    FormatPartition {
+        partition: String,
+        fs_type: FilesystemType,
+    },
+    FormatDisk {
+        disk: String,
+        fs_type: FilesystemType,
+    },
+    DeletePartition {
+        partition: String,
+    },
+    CreatePartitionTable {
+        disk: String,
+        table_type: String,
+    },
+    CreatePartition {
+        disk: String,
+        size: String,
+        fs_type: FilesystemType,
+    },
+}
+
+#[derive(Debug)]
+pub struct ConfirmationDialog {
+    pub show_dialog: bool,
+    pub title: String,
+    pub message: String,
+    pub details: Vec<(String, String)>,
+    pub selected: usize,
+    pub operation: ConfirmationOperation,
+}
+
+impl Default for ConfirmationDialog {
+    fn default() -> Self {
+        Self {
+            show_dialog: false,
+            title: String::new(),
+            message: String::new(),
+            details: Vec::new(),
+            selected: 0,
+            operation: ConfirmationOperation::None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusedBlock {
@@ -34,11 +82,6 @@ pub struct ProgressState {
     pub message: String,
     pub disk_name: String,
     pub disk_model: String,
-    pub percentage: u8,
-    pub bytes_written: u64,
-    pub total_bytes: u64,
-    pub speed_mbps: f64,
-    pub elapsed_seconds: u64,
     pub spinner_index: usize,
 }
 
@@ -102,6 +145,7 @@ pub struct App {
     pub progress: ProgressState,
     pub format_dialog: FormatDialogState,
     pub partition_dialog: PartitionDialogState,
+    pub confirmation_dialog: ConfirmationDialog,
     pub theme: Theme,
 }
 
@@ -140,6 +184,7 @@ impl App {
             progress: ProgressState::default(),
             format_dialog: FormatDialogState::default(),
             partition_dialog: PartitionDialogState::default(),
+            confirmation_dialog: ConfirmationDialog::default(),
             theme: Theme::new(),
         })
     }
@@ -192,7 +237,7 @@ impl App {
         self.notifications.iter_mut().for_each(|n| n.ttl -= 1);
 
         if self.progress.show_dialog {
-            self.progress.spinner_index = (self.progress.spinner_index + 1) % 4;
+            self.progress.spinner_index = (self.progress.spinner_index + 1) % 10;
         }
 
         Ok(())

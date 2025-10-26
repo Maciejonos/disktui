@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
 };
 
 use crate::app::{App, FocusedBlock, PartitionDialogMode};
@@ -16,6 +16,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     } else if app.progress.show_dialog {
         render_main(app, frame);
         render_progress_dialog(app, frame);
+    } else if app.confirmation_dialog.show_dialog {
+        render_main(app, frame);
+        render_confirmation_dialog(app, frame);
     } else if app.format_dialog.show_dialog {
         render_main(app, frame);
         render_format_dialog(app, frame);
@@ -52,24 +55,63 @@ fn render_main(app: &mut App, frame: &mut Frame) {
 }
 
 fn render_disks_table(app: &mut App, frame: &mut Frame, area: Rect) {
-    let header_color = if app.focused_block == FocusedBlock::Disks { app.theme.header } else { Color::Reset };
+    let header_color = if app.focused_block == FocusedBlock::Disks {
+        app.theme.header
+    } else {
+        Color::Reset
+    };
     let header = Row::new(vec![
-        Cell::from("Name").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Size").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Type").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Model").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Serial").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-    ]).bottom_margin(1);
+        Cell::from("Name").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Size").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Type").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Model").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Serial").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+    ])
+    .bottom_margin(1);
 
-    let rows: Vec<Row> = app.disks.iter().map(|disk| {
-        Row::new(vec![
-            Cell::from(disk.device.name.clone()),
-            Cell::from(disk.size_str()),
-            Cell::from(disk.device_type()),
-            Cell::from(disk.device.model.clone().unwrap_or_else(|| "N/A".to_string())),
-            Cell::from(disk.device.serial.clone().unwrap_or_else(|| "N/A".to_string())),
-        ])
-    }).collect();
+    let rows: Vec<Row> = app
+        .disks
+        .iter()
+        .map(|disk| {
+            Row::new(vec![
+                Cell::from(disk.device.name.clone()),
+                Cell::from(disk.size_str()),
+                Cell::from(disk.device_type()),
+                Cell::from(
+                    disk.device
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "N/A".to_string()),
+                ),
+                Cell::from(
+                    disk.device
+                        .serial
+                        .clone()
+                        .unwrap_or_else(|| "N/A".to_string()),
+                ),
+            ])
+        })
+        .collect();
 
     let widths = [
         Constraint::Length(app.theme.disk_name_width),
@@ -81,23 +123,27 @@ fn render_disks_table(app: &mut App, frame: &mut Frame, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default()
-            .title(" Disks ")
-            .borders(Borders::ALL)
-            .border_style(if app.focused_block == FocusedBlock::Disks {
-                Style::default().fg(app.theme.focus_border)
-            } else {
-                Style::default().fg(app.theme.normal_border)
-            })
-            .border_type(if app.focused_block == FocusedBlock::Disks {
-                BorderType::Thick
-            } else {
-                BorderType::default()
-            }))
+        .block(
+            Block::default()
+                .title(" Disks ")
+                .borders(Borders::ALL)
+                .border_style(if app.focused_block == FocusedBlock::Disks {
+                    Style::default().fg(app.theme.focus_border)
+                } else {
+                    Style::default().fg(app.theme.normal_border)
+                })
+                .border_type(if app.focused_block == FocusedBlock::Disks {
+                    BorderType::Thick
+                } else {
+                    BorderType::default()
+                }),
+        )
         .column_spacing(2)
         .style(Style::default())
         .row_highlight_style(if app.focused_block == FocusedBlock::Disks {
-            Style::default().bg(app.theme.highlight_bg).fg(app.theme.highlight_fg)
+            Style::default()
+                .bg(app.theme.highlight_bg)
+                .fg(app.theme.highlight_fg)
         } else {
             Style::default()
         });
@@ -106,27 +152,64 @@ fn render_disks_table(app: &mut App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_partitions_table(app: &mut App, frame: &mut Frame, area: Rect) {
-    let header_color = if app.focused_block == FocusedBlock::Partitions { app.theme.header } else { Color::Reset };
+    let header_color = if app.focused_block == FocusedBlock::Partitions {
+        app.theme.header
+    } else {
+        Color::Reset
+    };
     let header = Row::new(vec![
-        Cell::from("Name").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Size").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Filesystem").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Mount Point").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Label").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-        Cell::from("Usage").style(Style::default().add_modifier(Modifier::BOLD).fg(header_color)),
-    ]).bottom_margin(1);
+        Cell::from("Name").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Size").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Filesystem").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Mount Point").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Label").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+        Cell::from("Usage").style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(header_color),
+        ),
+    ])
+    .bottom_margin(1);
 
     let rows: Vec<Row> = if let Some(disk) = app.selected_disk() {
-        disk.device.partitions.iter().map(|part| {
-            Row::new(vec![
-                Cell::from(part.name.clone()),
-                Cell::from(part.size_str()),
-                Cell::from(part.filesystem.clone().unwrap_or_else(|| "N/A".to_string())),
-                Cell::from(part.mount_point.clone().unwrap_or_else(|| "-".to_string())),
-                Cell::from(part.label.clone().unwrap_or_else(|| "-".to_string())),
-                Cell::from(part.usage_str(app.theme.usage_bar_filled, app.theme.usage_bar_empty, app.theme.usage_bar_length)),
-            ])
-        }).collect()
+        disk.device
+            .partitions
+            .iter()
+            .map(|part| {
+                Row::new(vec![
+                    Cell::from(part.name.clone()),
+                    Cell::from(part.size_str()),
+                    Cell::from(part.filesystem.clone().unwrap_or_else(|| "N/A".to_string())),
+                    Cell::from(part.mount_point.clone().unwrap_or_else(|| "-".to_string())),
+                    Cell::from(part.label.clone().unwrap_or_else(|| "-".to_string())),
+                    Cell::from(part.usage_str(
+                        app.theme.usage_bar_filled,
+                        app.theme.usage_bar_empty,
+                        app.theme.usage_bar_length,
+                    )),
+                ])
+            })
+            .collect()
     } else {
         vec![]
     };
@@ -152,23 +235,27 @@ fn render_partitions_table(app: &mut App, frame: &mut Frame, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(if app.focused_block == FocusedBlock::Partitions {
-                Style::default().fg(app.theme.focus_border)
-            } else {
-                Style::default().fg(app.theme.normal_border)
-            })
-            .border_type(if app.focused_block == FocusedBlock::Partitions {
-                BorderType::Thick
-            } else {
-                BorderType::default()
-            }))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(if app.focused_block == FocusedBlock::Partitions {
+                    Style::default().fg(app.theme.focus_border)
+                } else {
+                    Style::default().fg(app.theme.normal_border)
+                })
+                .border_type(if app.focused_block == FocusedBlock::Partitions {
+                    BorderType::Thick
+                } else {
+                    BorderType::default()
+                }),
+        )
         .column_spacing(2)
         .style(Style::default())
         .row_highlight_style(if app.focused_block == FocusedBlock::Partitions {
-            Style::default().bg(app.theme.highlight_bg).fg(app.theme.highlight_fg)
+            Style::default()
+                .bg(app.theme.highlight_bg)
+                .fg(app.theme.highlight_fg)
         } else {
             Style::default()
         });
@@ -178,24 +265,37 @@ fn render_partitions_table(app: &mut App, frame: &mut Frame, area: Rect) {
 
 fn render_disk_summary(app: &App, frame: &mut Frame, area: Rect) {
     let text = if let Some(disk) = app.selected_disk() {
-        let model = disk.device.model.clone().unwrap_or_else(|| "N/A".to_string());
+        let model = disk
+            .device
+            .model
+            .clone()
+            .unwrap_or_else(|| "N/A".to_string());
         let size = disk.size_str();
         let dtype = disk.device_type();
-        let smart = disk.smart_data.as_ref().map(|s| s.health.clone()).unwrap_or_else(|| "N/A".to_string());
-        let temp = disk.smart_data.as_ref().and_then(|s| s.temperature).map(|t| format!("{}°C", t)).unwrap_or_else(|| "N/A".to_string());
+        let smart = disk
+            .smart_data
+            .as_ref()
+            .map(|s| s.health.clone())
+            .unwrap_or_else(|| "N/A".to_string());
+        let temp = disk
+            .smart_data
+            .as_ref()
+            .and_then(|s| s.temperature)
+            .map(|t| format!("{}°C", t))
+            .unwrap_or_else(|| "N/A".to_string());
 
         let layout_bar = generate_layout_bar(disk);
 
-        format!("Model: {} | Size: {} | Type: {} | SMART: {} | Temp: {}\nLayout: {}",
-            model, size, dtype, smart, temp, layout_bar)
+        format!(
+            "Model: {} | Size: {} | Type: {} | SMART: {} | Temp: {}\nLayout: {}",
+            model, size, dtype, smart, temp, layout_bar
+        )
     } else {
         "No disk selected".to_string()
     };
 
     let paragraph = Paragraph::new(text)
-        .block(Block::default()
-            .title(" Disk Info ")
-            .borders(Borders::ALL))
+        .block(Block::default().title(" Disk Info ").borders(Borders::ALL))
         .wrap(Wrap { trim: true })
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::White));
@@ -244,15 +344,20 @@ fn render_context_help(app: &App, frame: &mut Frame, area: Rect) {
             let disk_opt = app.selected_disk();
             let has_selection = disk_opt.is_some();
 
-            let has_free_space = disk_opt.map(|d| {
-                let used_space: u64 = d.device.partitions.iter().map(|p| p.size).sum();
-                d.device.size > used_space
-            }).unwrap_or(false);
+            let has_free_space = disk_opt
+                .map(|d| {
+                    let used_space: u64 = d.device.partitions.iter().map(|p| p.size).sum();
+                    d.device.size > used_space
+                })
+                .unwrap_or(false);
 
             // Check if disk has a partition table (not showing whole disk as single partition)
-            let has_partition_table = disk_opt.map(|d| {
-                !(d.device.partitions.len() == 1 && d.device.partitions[0].name == d.device.name)
-            }).unwrap_or(false);
+            let has_partition_table = disk_opt
+                .map(|d| {
+                    !(d.device.partitions.len() == 1
+                        && d.device.partitions[0].name == d.device.name)
+                })
+                .unwrap_or(false);
 
             if has_selection {
                 let mut spans = vec![
@@ -299,7 +404,10 @@ fn render_context_help(app: &App, frame: &mut Frame, area: Rect) {
         FocusedBlock::Partitions => {
             let has_selection = app.selected_partition().is_some();
             if has_selection {
-                let is_mounted = app.selected_partition().map(|p| p.is_mounted).unwrap_or(false);
+                let is_mounted = app
+                    .selected_partition()
+                    .map(|p| p.is_mounted)
+                    .unwrap_or(false);
                 let mount_text = if is_mounted { "Unmount" } else { "Mount" };
                 Line::from(vec![
                     Span::from("Tab ").bold().yellow(),
@@ -330,14 +438,12 @@ fn render_context_help(app: &App, frame: &mut Frame, area: Rect) {
                 ])
             }
         }
-        _ => {
-            Line::from(vec![
-                Span::from("? ").bold().yellow(),
-                Span::from("Help | "),
-                Span::from("q ").bold().yellow(),
-                Span::from("Quit"),
-            ])
-        }
+        _ => Line::from(vec![
+            Span::from("? ").bold().yellow(),
+            Span::from("Help | "),
+            Span::from("q ").bold().yellow(),
+            Span::from("Quit"),
+        ]),
     };
 
     frame.render_widget(help_text.centered(), area);
@@ -370,12 +476,16 @@ fn render_help_dialog(frame: &mut Frame) {
         Line::from("  j/Down         - Scroll down"),
         Line::from("  k/Up           - Scroll up"),
         Line::from(""),
-        Line::from("Disk Operations (focus on Partitions):").bold().yellow(),
+        Line::from("Disk Operations (focus on Partitions):")
+            .bold()
+            .yellow(),
         Line::from("  f  - Format partition/disk"),
         Line::from("  m  - Mount/unmount"),
         Line::from("  d  - Delete partition"),
         Line::from(""),
-        Line::from("Disk Operations (focus on Disks):").bold().yellow(),
+        Line::from("Disk Operations (focus on Disks):")
+            .bold()
+            .yellow(),
         Line::from("  p  - Partition (create table/partition)"),
         Line::from("  i  - Show disk SMART info"),
         Line::from(""),
@@ -393,12 +503,14 @@ fn render_help_dialog(frame: &mut Frame) {
     ];
 
     let block = Paragraph::new(help_text)
-        .block(Block::default()
-            .title(" Disk Utility TUI - Help ")
-            .title_alignment(Alignment::Center)
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(Color::Green)))
+        .block(
+            Block::default()
+                .title(" Disk Utility TUI - Help ")
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(Color::Green)),
+        )
         .style(Style::default().fg(Color::White));
 
     frame.render_widget(Clear, area);
@@ -424,19 +536,26 @@ fn render_format_dialog(app: &mut App, frame: &mut Frame) {
         ])
         .split(popup_layout[1])[1];
 
-    let part_name = app.selected_partition().map(|p| p.name.clone()).unwrap_or_default();
+    let part_name = app
+        .selected_partition()
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
 
-    let items: Vec<ListItem> = app.filesystem_types.iter().map(|fs| {
-        ListItem::new(fs.as_str())
-    }).collect();
+    let items: Vec<ListItem> = app
+        .filesystem_types
+        .iter()
+        .map(|fs| ListItem::new(fs.as_str()))
+        .collect();
 
     let list = List::new(items)
-        .block(Block::default()
-            .title(format!(" Format {} - Select Filesystem ", part_name))
-            .title_alignment(Alignment::Center)
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(Color::Green)))
+        .block(
+            Block::default()
+                .title(format!(" Format {} - Select Filesystem ", part_name))
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(Color::Green)),
+        )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
     let warning = Paragraph::new("WARNING: All data will be lost!\n\nEnter: Confirm | Esc: Cancel")
@@ -472,27 +591,37 @@ fn render_partition_dialog(app: &mut App, frame: &mut Frame) {
         ])
         .split(popup_layout[1])[1];
 
-    let disk_name = app.selected_disk().map(|d| d.device.name.clone()).unwrap_or_default();
+    let disk_name = app
+        .selected_disk()
+        .map(|d| d.device.name.clone())
+        .unwrap_or_default();
 
     frame.render_widget(Clear, area);
 
     if app.partition_dialog.mode == PartitionDialogMode::SelectTableType {
-        let items: Vec<ListItem> = app.partition_dialog.table_types.iter().map(|t| {
-            ListItem::new(t.clone())
-        }).collect();
+        let items: Vec<ListItem> = app
+            .partition_dialog
+            .table_types
+            .iter()
+            .map(|t| ListItem::new(t.clone()))
+            .collect();
 
         let list = List::new(items)
-            .block(Block::default()
-                .title(format!(" Create Partition Table on {} ", disk_name))
-                .title_alignment(Alignment::Center)
-                .borders(Borders::ALL)
-                .border_type(BorderType::Thick)
-                .border_style(Style::default().fg(Color::Green)))
+            .block(
+                Block::default()
+                    .title(format!(" Create Partition Table on {} ", disk_name))
+                    .title_alignment(Alignment::Center)
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Thick)
+                    .border_style(Style::default().fg(Color::Green)),
+            )
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
-        let info = Paragraph::new("Tab: Switch to create partition mode\nEnter: Create table | Esc: Cancel")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Yellow));
+        let info = Paragraph::new(
+            "Tab: Switch to create partition mode\nEnter: Create table | Esc: Cancel",
+        )
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Yellow));
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -526,60 +655,73 @@ fn render_partition_dialog(app: &mut App, frame: &mut Frame) {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),  // Label line
-                    Constraint::Length(3),  // Input box with border
-                    Constraint::Length(1),  // Spacing
-                    Constraint::Length(2),  // Info text (2 lines)
-                    Constraint::Fill(1),    // Remaining space
+                    Constraint::Length(1), // Label line
+                    Constraint::Length(3), // Input box with border
+                    Constraint::Length(1), // Spacing
+                    Constraint::Length(2), // Info text (2 lines)
+                    Constraint::Fill(1),   // Remaining space
                 ])
                 .split(inner_area);
 
             frame.render_widget(Clear, area);
             frame.render_widget(border_block, area);
 
-            let size_label = Paragraph::new(format!("Partition Size (Available: {}):", free_space_str));
+            let size_label =
+                Paragraph::new(format!("Partition Size (Available: {}):", free_space_str));
 
             let size_input = Paragraph::new(app.partition_dialog.size_input.value())
                 .block(Block::default().borders(Borders::ALL));
 
             let info = Paragraph::new(
                 "Examples: 100M, 2.5G, 1T (leave empty for max)\n\
-                 Enter: Next | Esc: Cancel"
+                 Enter: Next | Esc: Cancel",
             )
-                .alignment(Alignment::Center);
+            .alignment(Alignment::Center);
 
             frame.render_widget(size_label, chunks[0]);
             frame.render_widget(size_input, chunks[1]);
             frame.render_widget(info, chunks[3]);
         } else {
-            let items: Vec<ListItem> = app.filesystem_types.iter().map(|fs| {
-                ListItem::new(fs.to_string())
-            }).collect();
+            let items: Vec<ListItem> = app
+                .filesystem_types
+                .iter()
+                .map(|fs| ListItem::new(fs.to_string()))
+                .collect();
 
             let list = List::new(items)
-                .block(Block::default()
-                    .title(format!(" Select Filesystem for New Partition (Size: {}) ", app.partition_dialog.size_input.value()))
-                    .title_alignment(Alignment::Center)
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Thick)
-                    .border_style(Style::default().fg(Color::Green)))
+                .block(
+                    Block::default()
+                        .title(format!(
+                            " Select Filesystem for New Partition (Size: {}) ",
+                            app.partition_dialog.size_input.value()
+                        ))
+                        .title_alignment(Alignment::Center)
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Thick)
+                        .border_style(Style::default().fg(Color::Green)),
+                )
                 .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
-            let info = Paragraph::new("j/k: Navigate | Enter: Create Partition | Backspace: Go Back | Esc: Cancel")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::Yellow));
+            let info = Paragraph::new(
+                "j/k: Navigate | Enter: Create Partition | Backspace: Go Back | Esc: Cancel",
+            )
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Yellow));
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Fill(1), Constraint::Length(3)])
                 .split(area);
 
-            frame.render_stateful_widget(list, chunks[0], &mut app.partition_dialog.new_partition_fs_state);
+            frame.render_stateful_widget(
+                list,
+                chunks[0],
+                &mut app.partition_dialog.new_partition_fs_state,
+            );
             frame.render_widget(info, chunks[1]);
         }
     }
 }
-
 
 fn render_disk_info(app: &App, frame: &mut Frame) {
     let popup_layout = Layout::default()
@@ -617,33 +759,61 @@ fn render_disk_info(app: &App, frame: &mut Frame) {
             ]),
             Row::new(vec![
                 Cell::from("Model").style(Style::default().bold().yellow()),
-                Cell::from(disk.device.model.clone().unwrap_or_else(|| "N/A".to_string())),
+                Cell::from(
+                    disk.device
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "N/A".to_string()),
+                ),
             ]),
             Row::new(vec![
                 Cell::from("Serial").style(Style::default().bold().yellow()),
-                Cell::from(disk.device.serial.clone().unwrap_or_else(|| "N/A".to_string())),
+                Cell::from(
+                    disk.device
+                        .serial
+                        .clone()
+                        .unwrap_or_else(|| "N/A".to_string()),
+                ),
             ]),
             Row::new(vec![
                 Cell::from("SMART Health").style(Style::default().bold().yellow()),
-                Cell::from(disk.smart_data.as_ref().map(|s| s.health.clone()).unwrap_or_else(|| "N/A".to_string())),
+                Cell::from(
+                    disk.smart_data
+                        .as_ref()
+                        .map(|s| s.health.clone())
+                        .unwrap_or_else(|| "N/A".to_string()),
+                ),
             ]),
             Row::new(vec![
                 Cell::from("Temperature").style(Style::default().bold().yellow()),
-                Cell::from(disk.smart_data.as_ref().and_then(|s| s.temperature).map(|t| format!("{}°C", t)).unwrap_or_else(|| "N/A".to_string())),
+                Cell::from(
+                    disk.smart_data
+                        .as_ref()
+                        .and_then(|s| s.temperature)
+                        .map(|t| format!("{}°C", t))
+                        .unwrap_or_else(|| "N/A".to_string()),
+                ),
             ]),
             Row::new(vec![
                 Cell::from("Power On Hours").style(Style::default().bold().yellow()),
-                Cell::from(disk.smart_data.as_ref().and_then(|s| s.power_on_hours).map(|h| format!("{}", h)).unwrap_or_else(|| "N/A".to_string())),
+                Cell::from(
+                    disk.smart_data
+                        .as_ref()
+                        .and_then(|s| s.power_on_hours)
+                        .map(|h| format!("{}", h))
+                        .unwrap_or_else(|| "N/A".to_string()),
+                ),
             ]),
         ];
 
-        let table = Table::new(rows, [Constraint::Length(20), Constraint::Fill(1)])
-            .block(Block::default()
+        let table = Table::new(rows, [Constraint::Length(20), Constraint::Fill(1)]).block(
+            Block::default()
                 .title(" Disk Information ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Green))
-                .border_type(BorderType::Thick));
+                .border_type(BorderType::Thick),
+        );
 
         frame.render_widget(Clear, area);
         frame.render_widget(table, area);
@@ -654,9 +824,9 @@ fn render_progress_dialog(app: &App, frame: &mut Frame) {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(30),
-            Constraint::Length(14),
-            Constraint::Percentage(30),
+            Constraint::Fill(1),
+            Constraint::Length(10),
+            Constraint::Fill(1),
         ])
         .split(frame.area());
 
@@ -664,16 +834,19 @@ fn render_progress_dialog(app: &App, frame: &mut Frame) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Fill(1),
-            Constraint::Length(80),
+            Constraint::Length(60),
             Constraint::Fill(1),
         ])
         .split(popup_layout[1])[1];
 
-    let spinner_chars = ['|', '/', '-', '\\'];
-    let spinner = spinner_chars[app.progress.spinner_index];
+    let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let spinner = spinner_chars[app.progress.spinner_index % spinner_chars.len()];
 
     let title = if !app.progress.disk_name.is_empty() && !app.progress.disk_model.is_empty() {
-        format!(" {} /dev/{} ({}) ", app.progress.message, app.progress.disk_name, app.progress.disk_model)
+        format!(
+            " {} /dev/{} ({}) ",
+            app.progress.message, app.progress.disk_name, app.progress.disk_model
+        )
     } else if !app.progress.disk_name.is_empty() {
         format!(" {} /dev/{} ", app.progress.message, app.progress.disk_name)
     } else {
@@ -682,8 +855,10 @@ fn render_progress_dialog(app: &App, frame: &mut Frame) {
 
     let border_block = Block::default()
         .title(title)
-        .title_alignment(Alignment::Left)
-        .borders(Borders::ALL);
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(Color::Cyan));
 
     let inner_area = border_block.inner(area);
 
@@ -691,13 +866,7 @@ fn render_progress_dialog(app: &App, frame: &mut Frame) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Fill(1),
         ])
@@ -706,58 +875,130 @@ fn render_progress_dialog(app: &App, frame: &mut Frame) {
     frame.render_widget(Clear, area);
     frame.render_widget(border_block, area);
 
-    let message = Paragraph::new("");
+    // Centered spinner
+    let spinner_text = Paragraph::new(format!("{}", spinner))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center);
 
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL))
-        .percent(app.progress.percentage as u16)
-        .label(format!(" {}%", app.progress.percentage));
+    // Status message
+    let status_text = Paragraph::new("Please wait while the operation completes...")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
 
-    if app.progress.total_bytes > 0 {
-        let bytes_written_str = format_bytes(app.progress.bytes_written);
-        let total_bytes_str = format_bytes(app.progress.total_bytes);
-
-        let progress_line = Paragraph::new(format!("  Progress:  {} / {}", bytes_written_str, total_bytes_str));
-
-        let speed_line = Paragraph::new(format!("  Speed:     {}", format_speed(app.progress.speed_mbps)));
-
-        let elapsed_mins = app.progress.elapsed_seconds / 60;
-        let elapsed_secs = app.progress.elapsed_seconds % 60;
-        let elapsed_line = Paragraph::new(format!("  Elapsed:   {}m {:02}s", elapsed_mins, elapsed_secs));
-
-        let eta_text = if app.progress.speed_mbps > 0.1 && app.progress.percentage < 100 && app.progress.elapsed_seconds >= 3 {
-            let remaining_bytes = app.progress.total_bytes.saturating_sub(app.progress.bytes_written);
-            let remaining_seconds = (remaining_bytes as f64) / (app.progress.speed_mbps * 1_000_000.0);
-
-            let minutes = (remaining_seconds / 60.0) as u64;
-            let seconds = (remaining_seconds % 60.0) as u64;
-            format!("  ETA:       {}m {:02}s", minutes, seconds)
-        } else {
-            "  ETA:       calculating...".to_string()
-        };
-
-        let eta_line = Paragraph::new(format!("{}    {}", eta_text, spinner));
-
-        frame.render_widget(message, chunks[1]);
-        frame.render_widget(gauge, chunks[3]);
-        frame.render_widget(progress_line, chunks[5]);
-        frame.render_widget(speed_line, chunks[6]);
-        frame.render_widget(elapsed_line, chunks[7]);
-        frame.render_widget(eta_line, chunks[8]);
-    } else {
-        frame.render_widget(message, chunks[1]);
-        frame.render_widget(gauge, chunks[3]);
-    }
+    frame.render_widget(spinner_text, chunks[1]);
+    frame.render_widget(status_text, chunks[2]);
 }
 
-fn format_speed(speed_mbps: f64) -> String {
-    if speed_mbps >= 1000.0 {
-        format!("{:.1} GB/s", speed_mbps / 1000.0)
-    } else if speed_mbps >= 1.0 {
-        format!("{:.1} MB/s", speed_mbps)
-    } else if speed_mbps > 0.0 {
-        format!("{:.0} KB/s", speed_mbps * 1000.0)
-    } else {
-        "calculating...".to_string()
+fn render_confirmation_dialog(app: &mut App, frame: &mut Frame) {
+    // Calculate dialog height based on content
+    let details_count = app.confirmation_dialog.details.len();
+    let dialog_height = 10 + details_count as u16 * 1;
+
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(dialog_height),
+            Constraint::Fill(1),
+        ])
+        .split(frame.area());
+
+    let area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(60),
+            Constraint::Fill(1),
+        ])
+        .split(popup_layout[1])[1];
+
+    let border_block = Block::default()
+        .title(format!(" {} ", app.confirmation_dialog.title))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner_area = border_block.inner(area);
+
+    // Build content
+    let mut text_lines = vec![
+        Line::from(""),
+        Line::from(app.confirmation_dialog.message.clone()).style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(""),
+    ];
+
+    // Add details
+    if !app.confirmation_dialog.details.is_empty() {
+        for (key, value) in &app.confirmation_dialog.details {
+            text_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}: ", key),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(value.clone(), Style::default().fg(Color::White)),
+            ]));
+        }
+        text_lines.push(Line::from(""));
     }
+
+    // Warning message
+    text_lines.push(
+        Line::from("⚠ WARNING: This operation cannot be undone! ⚠")
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            .centered(),
+    );
+    text_lines.push(Line::from(""));
+
+    // Buttons
+    let no_style = if app.confirmation_dialog.selected == 0 {
+        Style::default()
+            .bg(Color::DarkGray)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let yes_style = if app.confirmation_dialog.selected == 1 {
+        Style::default()
+            .bg(Color::Red)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    text_lines.push(
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(" No ", no_style),
+            Span::raw("    "),
+            Span::styled(" Yes ", yes_style),
+        ])
+        .centered(),
+    );
+
+    text_lines.push(Line::from(""));
+    text_lines.push(
+        Line::from("← → or h/l to select  |  Enter to confirm  |  Esc to cancel")
+            .style(Style::default().fg(Color::DarkGray))
+            .centered(),
+    );
+
+    let paragraph = Paragraph::new(text_lines).alignment(Alignment::Left);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(border_block, area);
+    frame.render_widget(paragraph, inner_area);
 }

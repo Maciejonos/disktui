@@ -7,22 +7,12 @@ use tokio::sync::mpsc;
 use crate::{app::AppResult, notification::Notification};
 
 #[derive(Clone, Debug)]
-pub struct ProgressDetails {
-    pub percentage: u8,
-    pub bytes_written: u64,
-    pub total_bytes: u64,
-    pub speed_mbps: f64,
-    pub elapsed_seconds: u64,
-}
-
-#[derive(Clone, Debug)]
 pub enum Event {
     Tick,
     Key(KeyEvent),
     Notification(Notification),
     Refresh,
     StartProgress(String),
-    UpdateProgress(ProgressDetails),
     EndProgress,
 }
 

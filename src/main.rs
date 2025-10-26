@@ -52,30 +52,13 @@ async fn main() -> AppResult<()> {
             Event::StartProgress(message) => {
                 app.progress.show_dialog = true;
                 app.progress.message = message;
-                app.progress.percentage = 0;
-                app.progress.bytes_written = 0;
-                app.progress.total_bytes = 0;
-                app.progress.speed_mbps = 0.0;
-                app.progress.elapsed_seconds = 0;
                 app.progress.spinner_index = 0;
-            }
-            Event::UpdateProgress(details) => {
-                app.progress.percentage = details.percentage;
-                app.progress.bytes_written = details.bytes_written;
-                app.progress.total_bytes = details.total_bytes;
-                app.progress.speed_mbps = details.speed_mbps;
-                app.progress.elapsed_seconds = details.elapsed_seconds;
             }
             Event::EndProgress => {
                 app.progress.show_dialog = false;
                 app.progress.message.clear();
                 app.progress.disk_name.clear();
                 app.progress.disk_model.clear();
-                app.progress.percentage = 0;
-                app.progress.bytes_written = 0;
-                app.progress.total_bytes = 0;
-                app.progress.speed_mbps = 0.0;
-                app.progress.elapsed_seconds = 0;
                 app.operation_in_progress.store(false, std::sync::atomic::Ordering::Release);
             }
         }

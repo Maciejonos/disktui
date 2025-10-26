@@ -337,8 +337,6 @@ pub async fn format_whole_disk(
     fs_type: FilesystemType,
     sender: UnboundedSender<Event>,
 ) -> Result<()> {
-    use crate::event::ProgressDetails;
-
     validate_device_name(disk)?;
 
     let cmd = match fs_type {
@@ -366,14 +364,6 @@ pub async fn format_whole_disk(
 
     sender.send(Event::StartProgress(format!("Formatting {} as whole disk...", disk)))?;
 
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 10,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-
     let output = Command::new("parted")
         .args(["-s", &format!("/dev/{}", disk), "mklabel", "gpt"])
         .output()
@@ -391,23 +381,7 @@ pub async fn format_whole_disk(
         return Err(anyhow!("Failed to create partition table"));
     }
 
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 30,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 40,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
 
     let output = Command::new("parted")
         .args([
@@ -432,14 +406,6 @@ pub async fn format_whole_disk(
         )?;
         return Err(anyhow!("Failed to create partition"));
     }
-
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 60,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
 
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -472,8 +438,6 @@ pub async fn format_partition(
     fs_type: FilesystemType,
     sender: UnboundedSender<Event>,
 ) -> Result<()> {
-    use crate::event::ProgressDetails;
-
     validate_device_name(partition)?;
 
     if is_mounted(partition).await? {
@@ -511,21 +475,6 @@ pub async fn format_partition(
     }
 
     sender.send(Event::StartProgress(format!("Formatting {} as {}...", partition, fs_type.as_str())))?;
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 0,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 25,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
 
     let output = match Command::new(cmd)
         .args(&args)
@@ -544,14 +493,6 @@ pub async fn format_partition(
         }
     };
 
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 100,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     sender.send(Event::EndProgress)?;
 
     if !output.status.success() {
@@ -608,18 +549,9 @@ pub async fn create_partition_with_fs(
     fs_type: FilesystemType,
     sender: &UnboundedSender<Event>,
 ) -> Result<()> {
-    use crate::event::ProgressDetails;
-
     validate_device_name(disk)?;
 
     sender.send(Event::StartProgress(format!("Creating partition on {}...", disk)))?;
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 0,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
 
     let devices = list_block_devices().await?;
     let device = devices.iter().find(|d| d.name == disk);
@@ -666,14 +598,6 @@ pub async fn create_partition_with_fs(
         return Err(anyhow!("Size too large"));
     }
 
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 20,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-
     let start_offset = used_space;
     let start_mb = start_offset / 1_000_000;
     let end_offset = start_offset + requested_size;
@@ -710,23 +634,7 @@ pub async fn create_partition_with_fs(
         return Err(anyhow!("Create partition failed"));
     }
 
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 40,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 50,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
 
     let devices = list_block_devices().await?;
     let device = devices.iter().find(|d| d.name == disk);
@@ -734,14 +642,6 @@ pub async fn create_partition_with_fs(
     if let Some(device) = device {
         if let Some(new_partition) = device.partitions.last() {
             let part_name = new_partition.name.clone();
-
-            sender.send(Event::UpdateProgress(ProgressDetails {
-                percentage: 60,
-                bytes_written: 0,
-                total_bytes: 0,
-                speed_mbps: 0.0,
-        elapsed_seconds: 0,
-            }))?;
 
             Notification::send(
                 format!("Formatting {} as {}...", part_name, fs_type),
@@ -753,14 +653,6 @@ pub async fn create_partition_with_fs(
         }
     }
 
-    sender.send(Event::UpdateProgress(ProgressDetails {
-        percentage: 100,
-        bytes_written: 0,
-        total_bytes: 0,
-        speed_mbps: 0.0,
-        elapsed_seconds: 0,
-    }))?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     sender.send(Event::EndProgress)?;
 
     Notification::send(
