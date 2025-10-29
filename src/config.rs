@@ -51,6 +51,15 @@ pub struct DiskKeys {
 
     #[serde(default = "default_delete")]
     pub delete: char,
+
+    #[serde(default = "default_resize")]
+    pub resize: char,
+
+    #[serde(default = "default_lock")]
+    pub lock: char,
+
+    #[serde(default = "default_encrypt")]
+    pub encrypt: char,
 }
 
 impl Default for DiskKeys {
@@ -61,6 +70,9 @@ impl Default for DiskKeys {
             partition: 'p',
             mount: 'm',
             delete: 'd',
+            resize: 'r',
+            lock: 'l',
+            encrypt: 'e',
         }
     }
 }
@@ -83,6 +95,18 @@ fn default_mount() -> char {
 
 fn default_delete() -> char {
     'd'
+}
+
+fn default_resize() -> char {
+    'r'
+}
+
+fn default_lock() -> char {
+    'l'
+}
+
+fn default_encrypt() -> char {
+    'e'
 }
 
 impl Config {

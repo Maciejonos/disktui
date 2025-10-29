@@ -10,7 +10,7 @@ use crate::event::Event;
 use crate::notification::{Notification, NotificationLevel};
 use crate::operations::{
     create_partition_table, create_partition_with_fs, delete_partition, format_partition,
-    format_whole_disk, mount_partition, unmount_partition,
+    format_whole_disk, mount_partition, unmount_partition, resize_partition_and_filesystem,
 };
 
 fn check_operation_in_progress(app: &App, sender: &UnboundedSender<Event>) -> bool {
@@ -37,6 +37,10 @@ pub async fn handle_key_events(
         return Ok(());
     }
 
+    if app.passphrase_dialog.show_dialog {
+        return handle_passphrase_dialog(key_event, app, sender).await;
+    }
+
     if app.confirmation_dialog.show_dialog {
         return handle_confirmation_dialog(key_event, app, sender).await;
     }
@@ -47,6 +51,10 @@ pub async fn handle_key_events(
 
     if app.partition_dialog.show_dialog {
         return handle_partition_dialog(key_event, app, sender).await;
+    }
+
+    if app.resize_dialog.show_dialog {
+        return handle_resize_dialog(key_event, app, sender).await;
     }
 
     match key_event.code {
@@ -150,15 +158,15 @@ pub async fn handle_key_events(
                     }
 
                     app.operation_in_progress.store(true, Ordering::Release);
-                    let part_name = partition.name.clone();
+                    let device_name = partition.mapper_device.clone().unwrap_or(partition.name.clone());
                     let is_mounted = partition.is_mounted;
                     let sender_clone = sender.clone();
                     let operation_flag = app.operation_in_progress.clone();
                     tokio::spawn(async move {
                         if is_mounted {
-                            let _ = unmount_partition(&part_name, &sender_clone).await;
+                            let _ = unmount_partition(&device_name, &sender_clone).await;
                         } else {
-                            let _ = mount_partition(&part_name, &sender_clone).await;
+                            let _ = mount_partition(&device_name, &sender_clone).await;
                         }
                         let _ = sender_clone.send(Event::Refresh);
                         operation_flag.store(false, Ordering::Release);
@@ -205,6 +213,76 @@ pub async fn handle_key_events(
                 }
             }
         }
+        KeyCode::Char(c) if c == config.disk.resize => {
+            if app.focused_block == FocusedBlock::Partitions {
+                if let Some(partition) = app.selected_partition() {
+                    if partition.is_mounted {
+                        let _ = Notification::send(
+                            format!("{} is mounted. Unmount it first (press 'm')", partition.name),
+                            NotificationLevel::Warning,
+                            &sender,
+                        );
+                    } else if partition.is_encrypted {
+                        let _ = Notification::send(
+                            format!("{} is encrypted. Resizing encrypted partitions is not supported due to data corruption risks.", partition.name),
+                            NotificationLevel::Error,
+                            &sender,
+                        );
+                    } else {
+                        app.resize_dialog.show_dialog = true;
+                        app.resize_dialog.size_input = tui_input::Input::default();
+                    }
+                }
+            }
+        }
+        KeyCode::Char(c) if c == config.disk.lock => {
+            if app.focused_block == FocusedBlock::Partitions {
+                if let Some(partition) = app.selected_partition() {
+                    if partition.is_encrypted {
+                        if let Some(mapper_name) = &partition.mapper_device {
+                            use crate::app::ConfirmationOperation;
+                            let part_name = partition.name.clone();
+                            let mapper = mapper_name.clone();
+
+                            app.confirmation_dialog = crate::app::ConfirmationDialog {
+                                show_dialog: true,
+                                title: "Confirm Lock".to_string(),
+                                message: format!("Lock encrypted device {}?", part_name),
+                                details: vec![
+                                    ("Device".to_string(), part_name),
+                                    ("Mapper".to_string(), mapper.clone()),
+                                ],
+                                selected: 0,
+                                operation: ConfirmationOperation::LockLuksDevice {
+                                    mapper_name: mapper,
+                                },
+                            };
+                        } else {
+                            use crate::app::PassphraseOperation;
+                            let part_name = partition.name.clone();
+
+                            app.passphrase_dialog.show_dialog = true;
+                            app.passphrase_dialog.operation = PassphraseOperation::Unlock;
+                            app.passphrase_dialog.target_device = part_name;
+                            app.passphrase_dialog.input = tui_input::Input::default();
+                            app.passphrase_dialog.confirm_mode = false;
+                            app.passphrase_dialog.first_passphrase.clear();
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char(c) if c == config.disk.encrypt => {
+            if app.focused_block == FocusedBlock::Partitions {
+                if let Some(partition) = app.selected_partition() {
+                    if !partition.is_encrypted {
+                        app.format_dialog.show_dialog = true;
+                        app.format_dialog.type_state.select(Some(0));
+                        app.format_dialog.encrypt_mode = true;
+                    }
+                }
+            }
+        }
         _ => {}
     }
 
@@ -240,11 +318,32 @@ async fn handle_format_dialog(
 
             if let Some(fs_idx) = app.format_dialog.type_state.selected() {
                 let fs_type = app.filesystem_types[fs_idx].clone();
+
+                if app.format_dialog.encrypt_mode {
+                    use crate::app::PassphraseOperation;
+                    if let Some(partition) = app.selected_partition() {
+                        let part_name = partition.name.clone();
+
+                        app.format_dialog.show_dialog = false;
+                        app.format_dialog.encrypt_mode = false;
+
+                        app.passphrase_dialog.show_dialog = true;
+                        app.passphrase_dialog.operation = PassphraseOperation::Encrypt;
+                        app.passphrase_dialog.target_device = part_name;
+                        app.passphrase_dialog.input = tui_input::Input::default();
+                        app.passphrase_dialog.confirm_mode = false;
+                        app.passphrase_dialog.first_passphrase.clear();
+                        app.passphrase_dialog.filesystem_type = Some(fs_type);
+                    }
+                    return Ok(());
+                }
+
                 app.format_dialog.show_dialog = false;
 
                 if app.focused_block == FocusedBlock::Partitions {
                     if let Some(partition) = app.selected_partition() {
                         let part_name = partition.name.clone();
+                        let device_name = partition.mapper_device.clone().unwrap_or(partition.name.clone());
                         let part_size = format_bytes(partition.size);
                         let current_fs = partition
                             .filesystem
@@ -263,7 +362,7 @@ async fn handle_format_dialog(
                             ],
                             selected: 0,
                             operation: ConfirmationOperation::FormatPartition {
-                                partition: part_name,
+                                partition: device_name,
                                 fs_type,
                             },
                         };
@@ -547,6 +646,7 @@ async fn handle_confirmation_dialog(
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
             app.confirmation_dialog.show_dialog = false;
             app.confirmation_dialog.operation = ConfirmationOperation::None;
+            app.confirmation_dialog.selected = 0;
         }
         KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
             app.confirmation_dialog.selected = 1 - app.confirmation_dialog.selected;
@@ -556,6 +656,7 @@ async fn handle_confirmation_dialog(
                 let operation = app.confirmation_dialog.operation.clone();
                 app.confirmation_dialog.show_dialog = false;
                 app.confirmation_dialog.operation = ConfirmationOperation::None;
+                app.confirmation_dialog.selected = 0;
 
                 match operation {
                     ConfirmationOperation::FormatPartition { partition, fs_type } => {
@@ -629,14 +730,255 @@ async fn handle_confirmation_dialog(
                             operation_flag.store(false, Ordering::Release);
                         });
                     }
+                    ConfirmationOperation::ResizePartition {
+                        partition,
+                        new_size,
+                    } => {
+                        if check_operation_in_progress(app, &sender) {
+                            return Ok(());
+                        }
+                        app.operation_in_progress.store(true, Ordering::Release);
+                        let sender_clone = sender.clone();
+                        let operation_flag = app.operation_in_progress.clone();
+                        tokio::spawn(async move {
+                            let _ = resize_partition_and_filesystem(&partition, &new_size, &sender_clone)
+                                .await;
+                            let _ = sender_clone.send(Event::Refresh);
+                            operation_flag.store(false, Ordering::Release);
+                        });
+                    }
+                    ConfirmationOperation::LockLuksDevice { mapper_name } => {
+                        use crate::operations::lock_luks_device;
+                        if check_operation_in_progress(app, &sender) {
+                            return Ok(());
+                        }
+                        app.operation_in_progress.store(true, Ordering::Release);
+                        let sender_clone = sender.clone();
+                        let operation_flag = app.operation_in_progress.clone();
+                        tokio::spawn(async move {
+                            let _ = lock_luks_device(&mapper_name, &sender_clone).await;
+                            let _ = sender_clone.send(Event::Refresh);
+                            operation_flag.store(false, Ordering::Release);
+                        });
+                    }
+                    ConfirmationOperation::EncryptPartition { partition, fs_type } => {
+                        use crate::operations::encrypt_and_format_partition;
+                        if check_operation_in_progress(app, &sender) {
+                            return Ok(());
+                        }
+
+                        let passphrase = app.passphrase_dialog.first_passphrase.clone();
+                        app.passphrase_dialog.first_passphrase.clear();
+                        app.passphrase_dialog.filesystem_type = None;
+
+                        app.operation_in_progress.store(true, Ordering::Release);
+                        let sender_clone = sender.clone();
+                        let operation_flag = app.operation_in_progress.clone();
+                        tokio::spawn(async move {
+                            let _ = encrypt_and_format_partition(&partition, &passphrase, fs_type, &sender_clone).await;
+                            let _ = sender_clone.send(Event::Refresh);
+                            operation_flag.store(false, Ordering::Release);
+                        });
+                    }
+                    ConfirmationOperation::UnlockLuksDevice { device, mapper_name } => {
+                        use crate::operations::unlock_luks_device;
+                        if check_operation_in_progress(app, &sender) {
+                            return Ok(());
+                        }
+
+                        let passphrase = app.passphrase_dialog.first_passphrase.clone();
+                        app.passphrase_dialog.first_passphrase.clear();
+
+                        app.operation_in_progress.store(true, Ordering::Release);
+                        let sender_clone = sender.clone();
+                        let operation_flag = app.operation_in_progress.clone();
+                        tokio::spawn(async move {
+                            let _ = unlock_luks_device(&device, &passphrase, &mapper_name, &sender_clone).await;
+                            let _ = sender_clone.send(Event::Refresh);
+                            operation_flag.store(false, Ordering::Release);
+                        });
+                    }
                     ConfirmationOperation::None => {}
                 }
             } else {
                 app.confirmation_dialog.show_dialog = false;
                 app.confirmation_dialog.operation = ConfirmationOperation::None;
+                app.confirmation_dialog.selected = 0;
             }
         }
         _ => {}
     }
+    Ok(())
+}
+
+async fn handle_resize_dialog(
+    key_event: KeyEvent,
+    app: &mut App,
+    _sender: UnboundedSender<Event>,
+) -> AppResult<()> {
+    use crate::app::ConfirmationOperation;
+    use crate::utils::format_bytes;
+
+    match key_event.code {
+        KeyCode::Esc => {
+            app.resize_dialog.show_dialog = false;
+        }
+        KeyCode::Enter => {
+            if let Some(partition) = app.selected_partition() {
+                let part_name = partition.name.clone();
+                let current_size = partition.size;
+                let current_size_str = format_bytes(current_size);
+                let new_size_str = app.resize_dialog.size_input.value().to_string();
+
+                if new_size_str.trim().is_empty() {
+                    return Ok(());
+                }
+
+                let filesystem = partition
+                    .filesystem
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string());
+
+                app.resize_dialog.show_dialog = false;
+
+                app.confirmation_dialog = crate::app::ConfirmationDialog {
+                    show_dialog: true,
+                    title: "Confirm Resize Partition".to_string(),
+                    message: "Resize partition and filesystem to new size?".to_string(),
+                    details: vec![
+                        ("Partition".to_string(), part_name.clone()),
+                        ("Current Size".to_string(), current_size_str),
+                        ("New Size".to_string(), new_size_str.clone()),
+                        ("Filesystem".to_string(), filesystem),
+                    ],
+                    selected: 0,
+                    operation: ConfirmationOperation::ResizePartition {
+                        partition: part_name,
+                        new_size: new_size_str,
+                    },
+                };
+            }
+        }
+        _ => {
+            app.resize_dialog
+                .size_input
+                .handle_event(&crossterm::event::Event::Key(key_event));
+        }
+    }
+    Ok(())
+}
+
+async fn handle_passphrase_dialog(
+    key_event: KeyEvent,
+    app: &mut App,
+    sender: UnboundedSender<Event>,
+) -> AppResult<()> {
+    use crate::app::PassphraseOperation;
+    use crate::operations::unlock_luks_device;
+
+    match key_event.code {
+        KeyCode::Esc => {
+            app.passphrase_dialog.show_dialog = false;
+            app.passphrase_dialog.input = tui_input::Input::default();
+            app.passphrase_dialog.first_passphrase.clear();
+            app.passphrase_dialog.confirm_mode = false;
+        }
+        KeyCode::Enter => {
+            let passphrase = app.passphrase_dialog.input.value().to_string();
+
+            match app.passphrase_dialog.operation {
+                PassphraseOperation::Unlock => {
+                    if passphrase.is_empty() {
+                        let _ = Notification::send(
+                            "Passphrase cannot be empty".to_string(),
+                            NotificationLevel::Error,
+                            &sender,
+                        );
+                        return Ok(());
+                    }
+
+                    let device = app.passphrase_dialog.target_device.clone();
+                    let mapper_name = format!("luks-{}", device);
+
+                    app.passphrase_dialog.show_dialog = false;
+                    app.passphrase_dialog.input = tui_input::Input::default();
+
+                    if check_operation_in_progress(app, &sender) {
+                        return Ok(());
+                    }
+
+                    app.operation_in_progress.store(true, Ordering::Release);
+                    let sender_clone = sender.clone();
+                    let operation_flag = app.operation_in_progress.clone();
+
+                    tokio::spawn(async move {
+                        let _ = unlock_luks_device(&device, &passphrase, &mapper_name, &sender_clone).await;
+                        let _ = sender_clone.send(Event::Refresh);
+                        operation_flag.store(false, Ordering::Release);
+                    });
+                }
+                PassphraseOperation::Encrypt | PassphraseOperation::EncryptConfirm => {
+                    if passphrase.is_empty() {
+                        let _ = Notification::send(
+                            "Passphrase cannot be empty".to_string(),
+                            NotificationLevel::Error,
+                            &sender,
+                        );
+                        return Ok(());
+                    }
+
+                    if !app.passphrase_dialog.confirm_mode {
+                        app.passphrase_dialog.first_passphrase = passphrase;
+                        app.passphrase_dialog.input = tui_input::Input::default();
+                        app.passphrase_dialog.operation = PassphraseOperation::EncryptConfirm;
+                        app.passphrase_dialog.confirm_mode = true;
+                    } else {
+                        if passphrase != app.passphrase_dialog.first_passphrase {
+                            let _ = Notification::send(
+                                "Passphrases do not match".to_string(),
+                                NotificationLevel::Error,
+                                &sender,
+                            );
+                            app.passphrase_dialog.input = tui_input::Input::default();
+                            app.passphrase_dialog.first_passphrase.clear();
+                            app.passphrase_dialog.operation = PassphraseOperation::Encrypt;
+                            app.passphrase_dialog.confirm_mode = false;
+                            return Ok(());
+                        }
+
+                        use crate::app::ConfirmationOperation;
+                        let device = app.passphrase_dialog.target_device.clone();
+                        let fs_type = app.passphrase_dialog.filesystem_type.clone().unwrap_or(crate::operations::FilesystemType::Ext4);
+
+                        app.passphrase_dialog.show_dialog = false;
+                        app.passphrase_dialog.input = tui_input::Input::default();
+                        app.passphrase_dialog.confirm_mode = false;
+
+                        app.confirmation_dialog = crate::app::ConfirmationDialog {
+                            show_dialog: true,
+                            title: "Confirm Encrypt Partition".to_string(),
+                            message: "⚠ WARNING: All data will be lost! ⚠\nEncrypt this partition with LUKS2?".to_string(),
+                            details: vec![
+                                ("Partition".to_string(), device.clone()),
+                                ("Encryption".to_string(), "LUKS2".to_string()),
+                                ("Filesystem".to_string(), fs_type.to_string()),
+                            ],
+                            selected: 0,
+                            operation: ConfirmationOperation::EncryptPartition {
+                                partition: device,
+                                fs_type,
+                            },
+                        };
+                    }
+                }
+            }
+        }
+        _ => {
+            app.passphrase_dialog
+                .input
+                .handle_event(&crossterm::event::Event::Key(key_event));
+        }
+    }
+
     Ok(())
 }

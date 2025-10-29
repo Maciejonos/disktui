@@ -32,6 +32,21 @@ pub enum ConfirmationOperation {
         size: String,
         fs_type: FilesystemType,
     },
+    ResizePartition {
+        partition: String,
+        new_size: String,
+    },
+    UnlockLuksDevice {
+        device: String,
+        mapper_name: String,
+    },
+    LockLuksDevice {
+        mapper_name: String,
+    },
+    EncryptPartition {
+        partition: String,
+        fs_type: crate::operations::FilesystemType,
+    },
 }
 
 #[derive(Debug)]
@@ -89,6 +104,7 @@ pub struct ProgressState {
 pub struct FormatDialogState {
     pub show_dialog: bool,
     pub type_state: ListState,
+    pub encrypt_mode: bool,
 }
 
 impl Default for FormatDialogState {
@@ -97,6 +113,7 @@ impl Default for FormatDialogState {
         type_state.select(Some(0));
         Self {
             show_dialog: false,
+            encrypt_mode: false,
             type_state,
         }
     }
@@ -132,6 +149,53 @@ impl Default for PartitionDialogState {
     }
 }
 
+#[derive(Debug)]
+pub struct ResizeDialogState {
+    pub show_dialog: bool,
+    pub size_input: Input,
+}
+
+impl Default for ResizeDialogState {
+    fn default() -> Self {
+        Self {
+            show_dialog: false,
+            size_input: Input::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PassphraseOperation {
+    Unlock,
+    Encrypt,
+    EncryptConfirm,
+}
+
+#[derive(Debug)]
+pub struct PassphraseDialogState {
+    pub show_dialog: bool,
+    pub input: Input,
+    pub operation: PassphraseOperation,
+    pub target_device: String,
+    pub confirm_mode: bool,
+    pub first_passphrase: String,
+    pub filesystem_type: Option<crate::operations::FilesystemType>,
+}
+
+impl Default for PassphraseDialogState {
+    fn default() -> Self {
+        Self {
+            show_dialog: false,
+            input: Input::default(),
+            operation: PassphraseOperation::Unlock,
+            target_device: String::new(),
+            confirm_mode: false,
+            first_passphrase: String::new(),
+            filesystem_type: None,
+        }
+    }
+}
+
 pub struct App {
     pub running: bool,
     pub focused_block: FocusedBlock,
@@ -145,6 +209,8 @@ pub struct App {
     pub progress: ProgressState,
     pub format_dialog: FormatDialogState,
     pub partition_dialog: PartitionDialogState,
+    pub resize_dialog: ResizeDialogState,
+    pub passphrase_dialog: PassphraseDialogState,
     pub confirmation_dialog: ConfirmationDialog,
     pub theme: Theme,
 }
@@ -184,6 +250,8 @@ impl App {
             progress: ProgressState::default(),
             format_dialog: FormatDialogState::default(),
             partition_dialog: PartitionDialogState::default(),
+            resize_dialog: ResizeDialogState::default(),
+            passphrase_dialog: PassphraseDialogState::default(),
             confirmation_dialog: ConfirmationDialog::default(),
             theme: Theme::new(),
         })

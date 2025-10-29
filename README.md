@@ -11,7 +11,9 @@ https://github.com/user-attachments/assets/841aec6a-0d4b-4738-a637-a3a27469348e
 
 ### Required packages
 - `parted` - partition management
+- `sfdisk` - partition resizing (usually included with `util-linux`)
 - `e2fsprogs` - ext4 filesystem support
+- `cryptsetup` - LUKS encryption support
 
 ### Optional packages
 - `dosfstools` - FAT32 filesystem support
@@ -102,10 +104,20 @@ sudo disktui
 
 `m`: Mount/unmount selected partition.
 
+`r`: Resize selected partition (must be unmounted, encrypted partitions cannot be resized).
+
 `d`: Delete selected partition.
+
+`e`: Encrypt partition with LUKS2 (destroys all data).
+
+`l`: Lock/unlock encrypted partition (requires passphrase).
 
 ## Theming
 disktui follows terminal ANSI colors
+
+## 🔐 LUKS Encryption
+
+Press `e` to encrypt a partition with LUKS2, then `l` to lock/unlock it (requires passphrase). Encrypted partitions show 🔒 (locked) or 🔓 (unlocked) and must be unlocked before mounting or formatting.
 
 ## ⚖️ License
 

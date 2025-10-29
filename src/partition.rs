@@ -11,6 +11,10 @@ pub struct Partition {
     pub label: Option<String>,
     pub used_bytes: Option<u64>,
     pub available_bytes: Option<u64>,
+    pub is_encrypted: bool,
+    pub encryption_type: Option<String>,
+    pub luks_uuid: Option<String>,
+    pub mapper_device: Option<String>,
 }
 
 impl Partition {

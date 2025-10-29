@@ -16,6 +16,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     } else if app.progress.show_dialog {
         render_main(app, frame);
         render_progress_dialog(app, frame);
+    } else if app.passphrase_dialog.show_dialog {
+        render_main(app, frame);
+        render_passphrase_dialog(app, frame);
     } else if app.confirmation_dialog.show_dialog {
         render_main(app, frame);
         render_confirmation_dialog(app, frame);
@@ -25,6 +28,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     } else if app.partition_dialog.show_dialog {
         render_main(app, frame);
         render_partition_dialog(app, frame);
+    } else if app.resize_dialog.show_dialog {
+        render_main(app, frame);
+        render_resize_dialog(app, frame);
     } else if app.focused_block == FocusedBlock::DiskInfo {
         render_main(app, frame);
         render_disk_info(app, frame);
@@ -196,10 +202,28 @@ fn render_partitions_table(app: &mut App, frame: &mut Frame, area: Rect) {
             .partitions
             .iter()
             .map(|part| {
+                let name_display = if part.is_encrypted {
+                    if part.mapper_device.is_some() {
+                        format!("🔓 {}", part.name)
+                    } else {
+                        format!("🔒 {}", part.name)
+                    }
+                } else {
+                    part.name.clone()
+                };
+
+                let filesystem_display = if part.is_encrypted && part.mapper_device.is_none() {
+                    part.encryption_type
+                        .clone()
+                        .unwrap_or_else(|| "LUKS".to_string())
+                } else {
+                    part.filesystem.clone().unwrap_or_else(|| "N/A".to_string())
+                };
+
                 Row::new(vec![
-                    Cell::from(part.name.clone()),
+                    Cell::from(name_display),
                     Cell::from(part.size_str()),
-                    Cell::from(part.filesystem.clone().unwrap_or_else(|| "N/A".to_string())),
+                    Cell::from(filesystem_display),
                     Cell::from(part.mount_point.clone().unwrap_or_else(|| "-".to_string())),
                     Cell::from(part.label.clone().unwrap_or_else(|| "-".to_string())),
                     Cell::from(part.usage_str(
@@ -404,27 +428,67 @@ fn render_context_help(app: &App, frame: &mut Frame, area: Rect) {
         FocusedBlock::Partitions => {
             let has_selection = app.selected_partition().is_some();
             if has_selection {
-                let is_mounted = app
-                    .selected_partition()
-                    .map(|p| p.is_mounted)
-                    .unwrap_or(false);
+                let partition = app.selected_partition();
+                let is_mounted = partition.as_ref().map(|p| p.is_mounted).unwrap_or(false);
+                let is_encrypted = partition.as_ref().map(|p| p.is_encrypted).unwrap_or(false);
+                let is_unlocked = partition
+                    .as_ref()
+                    .and_then(|p| p.mapper_device.as_ref())
+                    .is_some();
+
                 let mount_text = if is_mounted { "Unmount" } else { "Mount" };
-                Line::from(vec![
+
+                let mut spans = vec![
                     Span::from("Tab ").bold().yellow(),
                     Span::from("Switch | "),
                     Span::from("j/k ").bold().yellow(),
                     Span::from("Scroll | "),
-                    Span::from("f ").bold().yellow(),
-                    Span::from("Format | "),
-                    Span::from("m ").bold().yellow(),
-                    Span::from(format!("{} | ", mount_text)),
+                ];
+
+                if is_encrypted {
+                    let lock_text = if is_unlocked { "Lock" } else { "Unlock" };
+                    spans.extend_from_slice(&[
+                        Span::from("l ").bold().yellow(),
+                        Span::from(format!("{} | ", lock_text)),
+                    ]);
+                } else {
+                    spans.extend_from_slice(&[
+                        Span::from("e ").bold().yellow(),
+                        Span::from("Encrypt | "),
+                    ]);
+                }
+
+                if !is_encrypted || is_unlocked {
+                    spans.extend_from_slice(&[
+                        Span::from("f ").bold().yellow(),
+                        Span::from("Format | "),
+                    ]);
+                }
+
+                if is_unlocked || !is_encrypted {
+                    spans.extend_from_slice(&[
+                        Span::from("m ").bold().yellow(),
+                        Span::from(format!("{} | ", mount_text)),
+                    ]);
+                }
+
+                if !is_mounted && !is_encrypted {
+                    spans.extend_from_slice(&[
+                        Span::from("r ").bold().yellow(),
+                        Span::from("Resize | "),
+                    ]);
+                }
+
+                spans.extend_from_slice(&[
                     Span::from("d ").bold().yellow(),
                     Span::from("Delete | "),
                     Span::from("? ").bold().yellow(),
                     Span::from("Help | "),
                     Span::from("q ").bold().yellow(),
                     Span::from("Quit"),
-                ])
+                ]);
+
+                Line::from(spans)
             } else {
                 Line::from(vec![
                     Span::from("Tab ").bold().yellow(),
@@ -481,6 +545,7 @@ fn render_help_dialog(frame: &mut Frame) {
             .yellow(),
         Line::from("  f  - Format partition/disk"),
         Line::from("  m  - Mount/unmount"),
+        Line::from("  r  - Resize partition (unmounted only)"),
         Line::from("  d  - Delete partition"),
         Line::from(""),
         Line::from("Disk Operations (focus on Disks):")
@@ -541,6 +606,12 @@ fn render_format_dialog(app: &mut App, frame: &mut Frame) {
         .map(|p| p.name.clone())
         .unwrap_or_default();
 
+    let title = if app.format_dialog.encrypt_mode {
+        format!(" Encrypt {} - Select Filesystem ", part_name)
+    } else {
+        format!(" Format {} - Select Filesystem ", part_name)
+    };
+
     let items: Vec<ListItem> = app
         .filesystem_types
         .iter()
@@ -550,7 +621,7 @@ fn render_format_dialog(app: &mut App, frame: &mut Frame) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!(" Format {} - Select Filesystem ", part_name))
+                .title(title)
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_type(BorderType::Thick)
@@ -1001,4 +1072,176 @@ fn render_confirmation_dialog(app: &mut App, frame: &mut Frame) {
     frame.render_widget(Clear, area);
     frame.render_widget(border_block, area);
     frame.render_widget(paragraph, inner_area);
+}
+
+fn render_resize_dialog(app: &mut App, frame: &mut Frame) {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Length(14),
+            Constraint::Percentage(30),
+        ])
+        .split(frame.area());
+
+    let area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(60),
+            Constraint::Fill(1),
+        ])
+        .split(popup_layout[1])[1];
+
+    if let Some(partition) = app.selected_partition() {
+        let current_size_str = format_bytes(partition.size);
+        let filesystem = partition
+            .filesystem
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+
+        let border_block = Block::default()
+            .title(format!(" Resize {} ", partition.name))
+            .title_alignment(Alignment::Center)
+            .borders(Borders::ALL)
+            .border_type(BorderType::Thick)
+            .border_style(Style::default().fg(Color::Green));
+
+        let inner_area = border_block.inner(area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // Current size info
+                Constraint::Length(1), // Spacing
+                Constraint::Length(1), // Label line
+                Constraint::Length(3), // Input box with border
+                Constraint::Length(1), // Spacing
+                Constraint::Length(4), // Info text (4 lines)
+                Constraint::Fill(1),   // Remaining space
+            ])
+            .split(inner_area);
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(border_block, area);
+
+        let info_text = Paragraph::new(format!(
+            "Current Size: {}\nFilesystem: {}",
+            current_size_str, filesystem
+        ))
+        .style(Style::default().fg(Color::White));
+
+        let size_label = Paragraph::new("New Size:");
+
+        let size_input = Paragraph::new(app.resize_dialog.size_input.value())
+            .block(Block::default().borders(Borders::ALL));
+
+        let help_text = Paragraph::new(
+            "Examples: 100M, 2.5G, 1T\n\
+             Supports both growing and shrinking.\n\
+             \n\
+             Enter: Confirm | Esc: Cancel",
+        )
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Yellow));
+
+        frame.render_widget(info_text, chunks[0]);
+        frame.render_widget(size_label, chunks[2]);
+        frame.render_widget(size_input, chunks[3]);
+        frame.render_widget(help_text, chunks[5]);
+    }
+}
+
+fn render_passphrase_dialog(app: &App, frame: &mut Frame) {
+    use crate::app::PassphraseOperation;
+
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Length(14),
+            Constraint::Percentage(30),
+        ])
+        .split(frame.area());
+
+    let area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(60),
+            Constraint::Fill(1),
+        ])
+        .split(popup_layout[1])[1];
+
+    let (title, warning_text, help_text) = match app.passphrase_dialog.operation {
+        PassphraseOperation::Unlock => (
+            format!(" Unlock {} ", app.passphrase_dialog.target_device),
+            "Enter passphrase to unlock encrypted device",
+            "Enter: Unlock | Esc: Cancel",
+        ),
+        PassphraseOperation::Encrypt => (
+            format!(" Encrypt {} ", app.passphrase_dialog.target_device),
+            "⚠ WARNING: All data will be lost! ⚠\nEnter passphrase for encryption",
+            "Enter: Next | Esc: Cancel",
+        ),
+        PassphraseOperation::EncryptConfirm => (
+            format!(" Encrypt {} ", app.passphrase_dialog.target_device),
+            "Confirm passphrase",
+            "Enter: Encrypt | Esc: Cancel",
+        ),
+    };
+
+    let border_block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner_area = border_block.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Warning text
+            Constraint::Length(1), // Spacing
+            Constraint::Length(1), // Label
+            Constraint::Length(3), // Input box
+            Constraint::Length(1), // Spacing
+            Constraint::Length(2), // Help text
+            Constraint::Fill(1),   // Remaining
+        ])
+        .split(inner_area);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(border_block, area);
+
+    let warning_color = match app.passphrase_dialog.operation {
+        PassphraseOperation::Encrypt => Color::Red,
+        _ => Color::Yellow,
+    };
+
+    let warning = Paragraph::new(warning_text)
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(warning_color)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let label = Paragraph::new("Passphrase:");
+
+    let masked_value: String = "*".repeat(app.passphrase_dialog.input.value().len());
+    let passphrase_input = Paragraph::new(masked_value)
+        .block(Block::default().borders(Borders::ALL))
+        .style(Style::default().fg(Color::White));
+
+    let help = Paragraph::new(help_text)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray));
+
+    frame.render_widget(warning, chunks[0]);
+    frame.render_widget(label, chunks[2]);
+    frame.render_widget(passphrase_input, chunks[3]);
+    frame.render_widget(help, chunks[5]);
 }
