@@ -24,13 +24,9 @@ https://github.com/user-attachments/assets/841aec6a-0d4b-4738-a637-a3a27469348e
 - `smartmontools` - SMART disk health monitoring
 
 > [!WARNING]
-> This tool can perform destructive disk operations.
+> This tool can perform destructive disk operations. You will be prompted to authenticate for operations requiring sudo.
 
 ## 🚀 Installation
-
-### 📥 Binary release
-
-You can download the pre-built binaries from the [release page](https://github.com/Maciejonos/disktui/releases)
 
 ### 📦 crates.io
 
@@ -65,11 +61,8 @@ sudo ./target/release/disktui
 
 ## 🪄 Usage
 
-> [!IMPORTANT]
-> disktui requires root privileges to perform disk operations.
-
 ```bash
-sudo disktui
+disktui
 ```
 
 ## ⌨️ Keybindings
