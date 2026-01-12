@@ -1,6 +1,6 @@
 use crate::disk::Disk;
 use crate::notification::Notification;
-use crate::operations::{FilesystemType, get_smart_data, list_block_devices};
+use crate::operations::{FilesystemType, HelperConnection, get_smart_data, list_block_devices};
 use crate::theme::Theme;
 use anyhow::Result;
 use ratatui::widgets::{ListState, TableState};
@@ -149,20 +149,12 @@ impl Default for PartitionDialogState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ResizeDialogState {
-    pub show_dialog: bool,
-    pub size_input: Input,
+	pub show_dialog: bool,
+	pub size_input: Input,
 }
 
-impl Default for ResizeDialogState {
-    fn default() -> Self {
-        Self {
-            show_dialog: false,
-            size_input: Input::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PassphraseOperation {
@@ -213,10 +205,11 @@ pub struct App {
     pub passphrase_dialog: PassphraseDialogState,
     pub confirmation_dialog: ConfirmationDialog,
     pub theme: Theme,
+    pub helper: Option<Arc<HelperConnection>>,
 }
 
 impl App {
-    pub async fn new() -> AppResult<Self> {
+    pub async fn new(helper: Option<Arc<HelperConnection>>) -> AppResult<Self> {
         let devices = list_block_devices().await?;
         let mut disks = Vec::new();
 
@@ -254,6 +247,7 @@ impl App {
             passphrase_dialog: PassphraseDialogState::default(),
             confirmation_dialog: ConfirmationDialog::default(),
             theme: Theme::new(),
+            helper,
         })
     }
 
@@ -280,8 +274,8 @@ impl App {
             }
         }
 
-        if let Some(disk_idx) = self.disks_state.selected() {
-            if disk_idx < self.disks.len() {
+        if let Some(disk_idx) = self.disks_state.selected()
+            && disk_idx < self.disks.len() {
                 let partitions_len = self.disks[disk_idx].device.partitions.len();
                 if let Some(part_idx) = selected_partition_index {
                     if part_idx < partitions_len {
@@ -295,7 +289,6 @@ impl App {
                     self.partitions_state.select(Some(0));
                 }
             }
-        }
 
         Ok(())
     }
@@ -316,13 +309,11 @@ impl App {
     }
 
     pub fn selected_partition(&self) -> Option<&crate::partition::Partition> {
-        if let Some(disk_idx) = self.disks_state.selected() {
-            if let Some(disk) = self.disks.get(disk_idx) {
-                if let Some(part_idx) = self.partitions_state.selected() {
+        if let Some(disk_idx) = self.disks_state.selected()
+            && let Some(disk) = self.disks.get(disk_idx)
+                && let Some(part_idx) = self.partitions_state.selected() {
                     return disk.device.partitions.get(part_idx);
                 }
-            }
-        }
         None
     }
 

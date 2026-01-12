@@ -1,11 +1,110 @@
 use crate::event::Event;
 use crate::notification::{Notification, NotificationLevel};
 use crate::partition::Partition;
+use crate::protocol::{Request, Response};
 use crate::utils::format_bytes;
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
+
+pub struct HelperConnection {
+	child: Child,
+	stdin: Arc<Mutex<ChildStdin>>,
+	stdout: Arc<Mutex<BufReader<ChildStdout>>>,
+}
+
+impl HelperConnection {
+	pub fn spawn() -> Result<Self> {
+		let helper_path = std::env::current_exe()
+			.ok()
+			.and_then(|p| p.parent().map(|d| d.join("disktui-helper")))
+			.unwrap_or_else(|| std::path::PathBuf::from("/usr/bin/disktui-helper"));
+
+		let mut child = std::process::Command::new("pkexec")
+			.arg(&helper_path)
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::null())
+			.spawn()
+			.context("Failed to spawn helper via pkexec")?;
+
+		let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to get stdin"))?;
+		let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to get stdout"))?;
+
+		Ok(Self {
+			child,
+			stdin: Arc::new(Mutex::new(stdin)),
+			stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+		})
+	}
+
+	pub fn send_request(&self, request: &Request) -> Result<()> {
+		let json = serde_json::to_string(request)?;
+		let mut stdin = self.stdin.lock().map_err(|_| anyhow!("Lock error"))?;
+		writeln!(stdin, "{}", json)?;
+		stdin.flush()?;
+		Ok(())
+	}
+
+	pub fn read_response(&self) -> Result<Response> {
+		let mut stdout = self.stdout.lock().map_err(|_| anyhow!("Lock error"))?;
+		let mut line = String::new();
+		stdout.read_line(&mut line)?;
+		let response: Response = serde_json::from_str(&line)?;
+		Ok(response)
+	}
+
+	pub fn request(
+		&self,
+		request: Request,
+		sender: &UnboundedSender<Event>,
+	) -> Result<Option<String>> {
+		self.send_request(&request)?;
+
+		loop {
+			let response = self.read_response()?;
+			match response {
+				Response::Ok { data } => return Ok(data),
+				Response::Error { message } => {
+					Notification::send(message.clone(), NotificationLevel::Error, sender)?;
+					return Err(anyhow!(message));
+				}
+				Response::Notification { level, message } => {
+					let level = match level.as_str() {
+						"error" => NotificationLevel::Error,
+						"warning" => NotificationLevel::Warning,
+						_ => NotificationLevel::Info,
+					};
+					Notification::send(message, level, sender)?;
+				}
+				Response::Progress { action, message } => {
+					if action == "start" {
+						if let Some(msg) = message {
+							sender.send(Event::StartProgress(msg))?;
+						}
+					} else if action == "end" {
+						sender.send(Event::EndProgress)?;
+					}
+				}
+			}
+		}
+	}
+
+	pub fn shutdown(&mut self) {
+		let _ = self.send_request(&Request::Shutdown);
+		let _ = self.child.wait();
+	}
+}
+
+impl Drop for HelperConnection {
+	fn drop(&mut self) {
+		self.shutdown();
+	}
+}
 
 fn validate_device_name(name: &str) -> Result<()> {
     if name.is_empty() {
@@ -30,15 +129,38 @@ fn validate_device_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+async fn get_last_partition_end_bytes(disk: &str) -> Result<u64> {
+    let output = Command::new("parted")
+        .args(["-s", "-m", &format!("/dev/{}", disk), "unit", "B", "print"])
+        .output()
+        .await
+        .context("Failed to execute parted")?;
+
+    if !output.status.success() {
+        return Ok(1_048_576);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut last_end: u64 = 1_048_576;
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3
+            && let Ok(_part_num) = parts[0].parse::<u32>()
+                && let Some(end_str) = parts[2].strip_suffix('B')
+                    && let Ok(end) = end_str.parse::<u64>()
+                        && end > last_end {
+                            last_end = end;
+                        }
+    }
+
+    let aligned = ((last_end + 1_048_576) / 1_048_576) * 1_048_576;
+    Ok(aligned)
+}
+
 fn get_device_path(device_name: &str) -> String {
     if device_name.starts_with("luks-") {
-        let mapper_path = format!("/dev/mapper/{}", device_name);
-        if std::path::Path::new(&mapper_path).exists() {
-            mapper_path
-        } else {
-            let base_device = device_name.strip_prefix("luks-").unwrap_or(device_name);
-            format!("/dev/{}", base_device)
-        }
+        format!("/dev/mapper/{}", device_name)
     } else {
         let mapper_path = format!("/dev/mapper/{}", device_name);
         if std::path::Path::new(&mapper_path).exists() {
@@ -175,7 +297,7 @@ fn parse_size(input: &str) -> Result<u64> {
         };
         (&input[..len], 1_000u64)
     } else {
-        (&input[..], 1u64)
+        (input, 1u64)
     };
 
     let num: f64 = num_str
@@ -214,20 +336,35 @@ async fn get_filesystem_usage(mount_point: &str) -> Option<(u64, u64)> {
     Some((used, available))
 }
 
+async fn get_device_mount_point(device_path: &str) -> Option<String> {
+    let output = Command::new("findmnt")
+        .args(["-n", "-o", "TARGET", device_path])
+        .output()
+        .await
+        .ok()?;
+
+    if output.status.success() {
+        let mount_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !mount_str.is_empty() {
+            return Some(mount_str);
+        }
+    }
+    None
+}
+
 async fn get_mapper_mount_point(mapper_name: &str, fallback: Option<String>) -> Option<String> {
     let mapper_mount_check = Command::new("findmnt")
         .args(["-n", "-o", "TARGET", &format!("/dev/mapper/{}", mapper_name)])
         .output()
         .await;
 
-    if let Ok(output) = mapper_mount_check {
-        if output.status.success() {
+    if let Ok(output) = mapper_mount_check
+        && output.status.success() {
             let mount_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !mount_str.is_empty() {
                 return Some(mount_str);
             }
         }
-    }
     fallback
 }
 
@@ -527,6 +664,8 @@ pub async fn unmount_partition(partition: &str, sender: &UnboundedSender<Event>)
         return Err(anyhow!("Device does not exist: {}", device_path));
     }
 
+    let actual_mount_point = get_device_mount_point(&device_path).await;
+
     sender.send(Event::StartProgress(format!("Unmounting {}...", partition)))?;
 
     let unmount_future = Command::new("umount").arg(&device_path).output();
@@ -546,7 +685,7 @@ pub async fn unmount_partition(partition: &str, sender: &UnboundedSender<Event>)
             Err(_) => {
                 sender.send(Event::EndProgress)?;
                 Notification::send(
-                    format!("Device is busy. Attempting lazy unmount..."),
+                    "Device is busy. Attempting lazy unmount...".to_string(),
                     NotificationLevel::Info,
                     sender,
                 )?;
@@ -574,15 +713,17 @@ pub async fn unmount_partition(partition: &str, sender: &UnboundedSender<Event>)
                     return Err(anyhow!("Lazy unmount failed"));
                 }
 
-                let mount_point = format!("/mnt/{}", partition);
-                let _ = Command::new("rmdir").arg(&mount_point).output().await;
+                if let Some(ref mp) = actual_mount_point
+                    && mp.starts_with("/mnt/") {
+                        let _ = Command::new("rmdir").arg(mp).output().await;
+                    }
 
                 Notification::send(
                     format!(
-                        "Lazy unmounted {} (will complete when no longer in use)",
+                        "Lazy unmount initiated for {}. Device still in use - wait before formatting/deleting!",
                         partition
                     ),
-                    NotificationLevel::Info,
+                    NotificationLevel::Warning,
                     sender,
                 )?;
                 return Ok(());
@@ -596,8 +737,8 @@ pub async fn unmount_partition(partition: &str, sender: &UnboundedSender<Event>)
 
         if err.contains("target is busy") || err.contains("device is busy") {
             Notification::send(
-                format!("Device is busy. Attempting lazy unmount..."),
-                NotificationLevel::Info,
+                format!("Device {} is busy. Attempting lazy unmount...", partition),
+                NotificationLevel::Warning,
                 sender,
             )?;
 
@@ -624,15 +765,17 @@ pub async fn unmount_partition(partition: &str, sender: &UnboundedSender<Event>)
                 return Err(anyhow!("Lazy unmount failed"));
             }
 
-            let mount_point = format!("/mnt/{}", partition);
-            let _ = Command::new("rmdir").arg(&mount_point).output().await;
+            if let Some(ref mp) = actual_mount_point
+                && mp.starts_with("/mnt/") {
+                    let _ = Command::new("rmdir").arg(mp).output().await;
+                }
 
             Notification::send(
                 format!(
-                    "Lazy unmounted {} (will complete when no longer in use)",
+                    "Lazy unmount initiated for {}. Device still in use - wait before formatting/deleting!",
                     partition
                 ),
-                NotificationLevel::Info,
+                NotificationLevel::Warning,
                 sender,
             )?;
             return Ok(());
@@ -646,8 +789,10 @@ pub async fn unmount_partition(partition: &str, sender: &UnboundedSender<Event>)
         return Err(anyhow!("Unmount failed"));
     }
 
-    let mount_point = format!("/mnt/{}", partition);
-    let _ = Command::new("rmdir").arg(&mount_point).output().await;
+    if let Some(ref mp) = actual_mount_point
+        && mp.starts_with("/mnt/") {
+            let _ = Command::new("rmdir").arg(mp).output().await;
+        }
 
     Notification::send(
         format!("Unmounted {}", partition),
@@ -690,6 +835,13 @@ pub async fn format_whole_disk(
                     )?;
                     lock_luks_device(&mapper_name, &sender).await?;
                 }
+            } else if partition.is_mounted {
+                Notification::send(
+                    format!("Unmounting {}...", partition.name),
+                    NotificationLevel::Info,
+                    &sender,
+                )?;
+                unmount_partition(&partition.name, &sender).await?;
             }
         }
     }
@@ -766,7 +918,7 @@ pub async fn format_whole_disk(
     }
 
     let _ = Command::new("partprobe")
-        .arg(&format!("/dev/{}", disk))
+        .arg(format!("/dev/{}", disk))
         .output()
         .await;
 
@@ -775,8 +927,8 @@ pub async fn format_whole_disk(
     let devices = list_block_devices().await?;
     let device = devices.iter().find(|d| d.name == disk);
 
-    if let Some(device) = device {
-        if let Some(new_partition) = device.partitions.first() {
+    if let Some(device) = device
+        && let Some(new_partition) = device.partitions.first() {
             let part_name = new_partition.name.clone();
             let fs_str = fs_type.as_str().to_string();
             format_partition(&part_name, fs_type, sender.clone()).await?;
@@ -790,7 +942,6 @@ pub async fn format_whole_disk(
             )?;
             return Ok(());
         }
-    }
 
     sender.send(Event::EndProgress)?;
     Err(anyhow!("Failed to find new partition"))
@@ -983,8 +1134,8 @@ async fn create_partition_raw(
     }
 
     let device = device.unwrap();
-    let used_space: u64 = device.partitions.iter().map(|p| p.size).sum();
-    let free_space = device.size.saturating_sub(used_space);
+    let start_offset = get_last_partition_end_bytes(disk).await?;
+    let free_space = device.size.saturating_sub(start_offset);
 
     if free_space == 0 {
         Notification::send(
@@ -1014,7 +1165,6 @@ async fn create_partition_raw(
         return Err(anyhow!("Size too large"));
     }
 
-    let start_offset = used_space;
     let start_mb = start_offset / 1_000_000;
     let end_offset = start_offset + requested_size;
     let end_mb = end_offset / 1_000_000;
@@ -1053,11 +1203,10 @@ async fn create_partition_raw(
     let devices = list_block_devices().await?;
     let device = devices.iter().find(|d| d.name == disk);
 
-    if let Some(device) = device {
-        if let Some(new_partition) = device.partitions.last() {
+    if let Some(device) = device
+        && let Some(new_partition) = device.partitions.last() {
             return Ok(new_partition.name.clone());
         }
-    }
 
     Err(anyhow!("Failed to find new partition"))
 }
@@ -1100,8 +1249,8 @@ pub async fn delete_partition(partition: &str, sender: &UnboundedSender<Event>) 
     let is_luks = is_luks_device(partition).await.unwrap_or(false);
 
     let luks_status = get_luks_status(partition).await?;
-    if luks_status.is_active {
-        if let Some(mapper_name) = luks_status.mapper_name {
+    if luks_status.is_active
+        && let Some(mapper_name) = luks_status.mapper_name {
             let mapper_path = format!("/dev/mapper/{}", mapper_name);
             let mapper_mounted = Command::new("findmnt")
                 .args(["-n", &mapper_path])
@@ -1121,7 +1270,6 @@ pub async fn delete_partition(partition: &str, sender: &UnboundedSender<Event>) 
             )?;
             lock_luks_device(&mapper_name, sender).await?;
         }
-    }
 
     if is_mounted(partition).await? {
         unmount_partition(partition, sender).await?;
@@ -1202,12 +1350,12 @@ pub async fn delete_partition(partition: &str, sender: &UnboundedSender<Event>) 
     }
 
     let partprobe_output = Command::new("partprobe")
-        .arg(&format!("/dev/{}", disk))
+        .arg(format!("/dev/{}", disk))
         .output()
         .await;
 
-    if let Ok(output) = partprobe_output {
-        if !output.status.success() {
+    if let Ok(output) = partprobe_output
+        && !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
             Notification::send(
                 format!("Warning: partprobe failed: {}. Partition deleted but you may need to reboot.", err),
@@ -1215,7 +1363,6 @@ pub async fn delete_partition(partition: &str, sender: &UnboundedSender<Event>) 
                 sender,
             )?;
         }
-    }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -1229,6 +1376,8 @@ pub async fn delete_partition(partition: &str, sender: &UnboundedSender<Event>) 
 }
 
 pub async fn get_smart_data(disk: &str) -> Result<SmartData> {
+    validate_device_name(disk)?;
+
     let output = Command::new("smartctl")
         .args(["-H", "-A", &format!("/dev/{}", disk)])
         .output()
@@ -1427,7 +1576,7 @@ pub async fn resize_partition_and_filesystem(
                 return Err(anyhow!("Could not find start sector"));
             }
 
-            let size_sectors = (new_size_bytes + 511) / 512;
+            let size_sectors = new_size_bytes.div_ceil(512);
 
             let mut new_line = format!("{} : {}, size={}", device_part, start_str, size_sectors);
             for attr in other_attrs {
@@ -1485,7 +1634,7 @@ pub async fn resize_partition_and_filesystem(
 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     let _ = Command::new("partprobe")
-        .arg(&format!("/dev/{}", disk))
+        .arg(format!("/dev/{}", disk))
         .output()
         .await;
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -1585,9 +1734,16 @@ async fn resize_filesystem(
             if mount_output.status.success() {
                 let resize_output = Command::new("xfs_growfs").arg(&mount_point).output().await;
 
-                let _ = Command::new("umount").arg(&mount_point).output().await;
-
-                let _ = Command::new("rmdir").arg(&mount_point).output().await;
+                let umount_result = Command::new("umount").arg(&mount_point).output().await;
+                if umount_result.is_ok() && umount_result.as_ref().unwrap().status.success() {
+                    let _ = Command::new("rmdir").arg(&mount_point).output().await;
+                } else {
+                    Notification::send(
+                        format!("Warning: Failed to unmount temp mount at {}", mount_point),
+                        NotificationLevel::Warning,
+                        sender,
+                    )?;
+                }
 
                 if let Ok(output) = resize_output {
                     if !output.status.success() {
@@ -1619,36 +1775,59 @@ async fn resize_filesystem(
             }
         }
         "ntfs" => {
-            let output = if is_growing {
-                Command::new("ntfsresize")
-                    .args(["-f", &device_path])
-                    .output()
-                    .await
+            let size_str = new_size_bytes.to_string();
+            let args: Vec<&str> = if is_growing {
+                vec!["-f", "-f", &device_path]
             } else {
-                let size_str = new_size_bytes.to_string();
-                Command::new("ntfsresize")
-                    .args(["-f", "-s", &size_str, &device_path])
-                    .output()
-                    .await
+                vec!["-f", "-f", "-s", &size_str, &device_path]
             };
 
-            if let Ok(output) = output {
-                if !output.status.success() {
-                    let err = String::from_utf8_lossy(&output.stderr);
+            let child = Command::new("ntfsresize")
+                .args(&args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+
+            match child {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use tokio::io::AsyncWriteExt;
+                        let _ = stdin.write_all(b"y\n").await;
+                        let _ = stdin.flush().await;
+                        drop(stdin);
+                    }
+
+                    match child.wait_with_output().await {
+                        Ok(output) => {
+                            if !output.status.success() {
+                                let err = String::from_utf8_lossy(&output.stderr);
+                                Notification::send(
+                                    format!("NTFS resize failed: {}", err),
+                                    NotificationLevel::Error,
+                                    sender,
+                                )?;
+                                return Err(anyhow!("ntfsresize failed"));
+                            }
+                        }
+                        Err(e) => {
+                            Notification::send(
+                                format!("NTFS resize failed: {}", e),
+                                NotificationLevel::Error,
+                                sender,
+                            )?;
+                            return Err(anyhow!("ntfsresize failed"));
+                        }
+                    }
+                }
+                Err(_) => {
                     Notification::send(
-                        format!("NTFS resize failed: {}", err),
+                        "ntfsresize not found. Install ntfs-3g package.".to_string(),
                         NotificationLevel::Error,
                         sender,
                     )?;
-                    return Err(anyhow!("ntfsresize failed"));
+                    return Err(anyhow!("ntfsresize not found"));
                 }
-            } else {
-                Notification::send(
-                    "ntfsresize not found. Install ntfs-3g package.".to_string(),
-                    NotificationLevel::Error,
-                    sender,
-                )?;
-                return Err(anyhow!("ntfsresize not found"));
             }
         }
         "btrfs" => {
@@ -1675,9 +1854,16 @@ async fn resize_filesystem(
                     .output()
                     .await;
 
-                let _ = Command::new("umount").arg(&mount_point).output().await;
-
-                let _ = Command::new("rmdir").arg(&mount_point).output().await;
+                let umount_result = Command::new("umount").arg(&mount_point).output().await;
+                if umount_result.is_ok() && umount_result.as_ref().unwrap().status.success() {
+                    let _ = Command::new("rmdir").arg(&mount_point).output().await;
+                } else {
+                    Notification::send(
+                        format!("Warning: Failed to unmount temp mount at {}", mount_point),
+                        NotificationLevel::Warning,
+                        sender,
+                    )?;
+                }
 
                 if let Ok(output) = resize_output {
                     if !output.status.success() {
@@ -1734,6 +1920,8 @@ async fn resize_filesystem(
 }
 
 pub async fn is_luks_device(device: &str) -> Result<bool> {
+    validate_device_name(device)?;
+
     let output = Command::new("cryptsetup")
         .args(["isLuks", &format!("/dev/{}", device)])
         .output()
@@ -1746,6 +1934,8 @@ pub async fn is_luks_device(device: &str) -> Result<bool> {
 }
 
 pub async fn get_luks_info(device: &str) -> Result<LuksInfo> {
+    validate_device_name(device)?;
+
     let output = Command::new("cryptsetup")
         .args(["luksDump", &format!("/dev/{}", device)])
         .output()
@@ -1789,6 +1979,8 @@ pub async fn get_luks_info(device: &str) -> Result<LuksInfo> {
 }
 
 pub async fn get_luks_status(device: &str) -> Result<LuksStatus> {
+    validate_device_name(device)?;
+
     let mapper_entries = std::fs::read_dir("/dev/mapper");
 
     if mapper_entries.is_err() {
@@ -1810,20 +2002,20 @@ pub async fn get_luks_status(device: &str) -> Result<LuksStatus> {
             .output()
             .await;
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
 
-                for line in stdout.lines() {
-                    if line.trim().starts_with("device:") {
-                        let dev_path = line.split(':').nth(1).unwrap_or("").trim();
-                        if dev_path.ends_with(device) || dev_path == format!("/dev/{}", device) {
-                            return Ok(LuksStatus {
-                                is_active: true,
-                                mapper_name: Some(mapper_name),
-                                device_path: Some(dev_path.to_string()),
-                            });
-                        }
+            for line in stdout.lines() {
+                if line.trim().starts_with("device:") {
+                    let dev_path = line.split(':').nth(1).unwrap_or("").trim();
+                    if dev_path.ends_with(device) || dev_path == format!("/dev/{}", device) {
+                        return Ok(LuksStatus {
+                            is_active: true,
+                            mapper_name: Some(mapper_name),
+                            device_path: Some(dev_path.to_string()),
+                        });
                     }
                 }
             }
@@ -1955,9 +2147,7 @@ pub async fn lock_luks_device(mapper_name: &str, sender: &UnboundedSender<Event>
         Err(_) => {
             sender.send(Event::EndProgress)?;
             Notification::send(
-                format!(
-                    "Lock operation timed out. Device may still be in use. Try closing any applications accessing the device."
-                ),
+                "Lock operation timed out. Device may still be in use. Try closing any applications accessing the device.".to_string(),
                 NotificationLevel::Error,
                 sender,
             )?;
@@ -2081,6 +2271,30 @@ pub async fn encrypt_and_format_partition(
 
     sender.send(Event::StartProgress(format!("Encrypting {}...", partition)))?;
 
+    let result = encrypt_and_format_partition_inner(partition, passphrase, fs_type, sender).await;
+
+    sender.send(Event::EndProgress)?;
+
+    if result.is_ok() {
+        Notification::send(
+            format!(
+                "Partition {} encrypted and formatted successfully",
+                partition
+            ),
+            NotificationLevel::Info,
+            sender,
+        )?;
+    }
+
+    result
+}
+
+async fn encrypt_and_format_partition_inner(
+    partition: &str,
+    passphrase: &str,
+    fs_type: FilesystemType,
+    sender: &UnboundedSender<Event>,
+) -> Result<()> {
     encrypt_partition(partition, passphrase, sender).await?;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -2088,7 +2302,7 @@ pub async fn encrypt_and_format_partition(
     let mapper_name = format!("luks-{}", partition);
 
     Notification::send(
-        format!("Unlocking encrypted partition..."),
+        "Unlocking encrypted partition...".to_string(),
         NotificationLevel::Info,
         sender,
     )?;
@@ -2112,17 +2326,6 @@ pub async fn encrypt_and_format_partition(
     )?;
 
     format_partition(&mapper_name, fs_type, sender.clone()).await?;
-
-    sender.send(Event::EndProgress)?;
-
-    Notification::send(
-        format!(
-            "Partition {} encrypted and formatted successfully",
-            partition
-        ),
-        NotificationLevel::Info,
-        sender,
-    )?;
 
     Ok(())
 }

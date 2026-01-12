@@ -8,22 +8,66 @@ use crate::app::{App, AppResult, FocusedBlock, PartitionDialogMode};
 use crate::config::Config;
 use crate::event::Event;
 use crate::notification::{Notification, NotificationLevel};
-use crate::operations::{
-    create_partition_table, create_partition_with_fs, delete_partition, format_partition,
-    format_whole_disk, mount_partition, unmount_partition, resize_partition_and_filesystem,
-};
+use crate::operations::HelperConnection;
+use crate::protocol::Request;
+
+type SharedHelper = Arc<HelperConnection>;
 
 fn check_operation_in_progress(app: &App, sender: &UnboundedSender<Event>) -> bool {
-    if app.operation_in_progress.load(Ordering::Acquire) {
-        let _ = Notification::send(
-            "Operation already in progress".to_string(),
-            NotificationLevel::Warning,
-            sender,
-        );
-        true
-    } else {
-        false
-    }
+	if app.operation_in_progress.load(Ordering::Acquire) {
+		let _ = Notification::send(
+			"Operation already in progress".to_string(),
+			NotificationLevel::Warning,
+			sender,
+		);
+		true
+	} else {
+		false
+	}
+}
+
+fn ensure_helper(app: &mut App, sender: &UnboundedSender<Event>) -> Option<SharedHelper> {
+	if let Some(ref helper) = app.helper {
+		return Some(helper.clone());
+	}
+
+	match HelperConnection::spawn() {
+		Ok(helper) => {
+			let helper = Arc::new(helper);
+			app.helper = Some(helper.clone());
+			Some(helper)
+		}
+		Err(e) => {
+			let _ = Notification::send(
+				format!("Failed to start privileged helper: {}", e),
+				NotificationLevel::Error,
+				sender,
+			);
+			None
+		}
+	}
+}
+
+fn spawn_helper_operation(
+	app: &mut App,
+	sender: &UnboundedSender<Event>,
+	request: Request,
+) -> bool {
+	if check_operation_in_progress(app, sender) {
+		return false;
+	}
+	let Some(helper) = ensure_helper(app, sender) else {
+		return false;
+	};
+	app.operation_in_progress.store(true, Ordering::Release);
+	let sender_clone = sender.clone();
+	let operation_flag = app.operation_in_progress.clone();
+	tokio::task::spawn_blocking(move || {
+		let _ = helper.request(request, &sender_clone);
+		let _ = sender_clone.send(Event::Refresh);
+		operation_flag.store(false, Ordering::Release);
+	});
+	true
 }
 
 pub async fn handle_key_events(
@@ -105,17 +149,16 @@ pub async fn handle_key_events(
             handle_scroll_up(app);
         }
         KeyCode::Char(c) if c == config.disk.format => {
-            if app.focused_block == FocusedBlock::Partitions && app.selected_partition().is_some() {
-                app.format_dialog.show_dialog = true;
-                app.format_dialog.type_state.select(Some(0));
-            } else if app.focused_block == FocusedBlock::Disks && app.selected_disk().is_some() {
+            if (app.focused_block == FocusedBlock::Partitions && app.selected_partition().is_some())
+                || (app.focused_block == FocusedBlock::Disks && app.selected_disk().is_some())
+            {
                 app.format_dialog.show_dialog = true;
                 app.format_dialog.type_state.select(Some(0));
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
-            if app.focused_block == FocusedBlock::Disks {
-                if let Some(disk) = app.selected_disk() {
+            if app.focused_block == FocusedBlock::Disks
+                && let Some(disk) = app.selected_disk() {
                     if disk.device.partitions.len() == 1
                         && disk.device.partitions[0].name == disk.device.name
                     {
@@ -141,7 +184,6 @@ pub async fn handle_key_events(
                         }
                     }
                 }
-            }
         }
         KeyCode::Char(c) if c == config.disk.partition => {
             if app.focused_block == FocusedBlock::Disks && app.selected_disk().is_some() {
@@ -150,36 +192,23 @@ pub async fn handle_key_events(
             }
         }
         KeyCode::Char(c) if c == config.disk.mount => {
-            if app.focused_block == FocusedBlock::Partitions {
-                if let Some(partition) = app.selected_partition() {
-                    // Check if another operation is in progress
-                    if check_operation_in_progress(app, &sender) {
-                        return Ok(());
-                    }
-
-                    app.operation_in_progress.store(true, Ordering::Release);
+            if app.focused_block == FocusedBlock::Partitions
+                && let Some(partition) = app.selected_partition() {
                     let device_name = partition.mapper_device.clone().unwrap_or(partition.name.clone());
-                    let is_mounted = partition.is_mounted;
-                    let sender_clone = sender.clone();
-                    let operation_flag = app.operation_in_progress.clone();
-                    tokio::spawn(async move {
-                        if is_mounted {
-                            let _ = unmount_partition(&device_name, &sender_clone).await;
-                        } else {
-                            let _ = mount_partition(&device_name, &sender_clone).await;
-                        }
-                        let _ = sender_clone.send(Event::Refresh);
-                        operation_flag.store(false, Ordering::Release);
-                    });
+                    let request = if partition.is_mounted {
+                        Request::Unmount { device: device_name }
+                    } else {
+                        Request::Mount { device: device_name }
+                    };
+                    spawn_helper_operation(app, &sender, request);
                 }
-            }
         }
         KeyCode::Char(c) if c == config.disk.delete => {
             use crate::app::ConfirmationOperation;
             use crate::utils::format_bytes;
 
-            if app.focused_block == FocusedBlock::Partitions {
-                if let Some(partition) = app.selected_partition() {
+            if app.focused_block == FocusedBlock::Partitions
+                && let Some(partition) = app.selected_partition() {
                     let part_name = partition.name.clone();
                     let part_size = format_bytes(partition.size);
                     let filesystem = partition
@@ -211,11 +240,10 @@ pub async fn handle_key_events(
                         },
                     };
                 }
-            }
         }
         KeyCode::Char(c) if c == config.disk.resize => {
-            if app.focused_block == FocusedBlock::Partitions {
-                if let Some(partition) = app.selected_partition() {
+            if app.focused_block == FocusedBlock::Partitions
+                && let Some(partition) = app.selected_partition() {
                     if partition.is_mounted {
                         let _ = Notification::send(
                             format!("{} is mounted. Unmount it first (press 'm')", partition.name),
@@ -233,12 +261,11 @@ pub async fn handle_key_events(
                         app.resize_dialog.size_input = tui_input::Input::default();
                     }
                 }
-            }
         }
         KeyCode::Char(c) if c == config.disk.lock => {
-            if app.focused_block == FocusedBlock::Partitions {
-                if let Some(partition) = app.selected_partition() {
-                    if partition.is_encrypted {
+            if app.focused_block == FocusedBlock::Partitions
+                && let Some(partition) = app.selected_partition()
+                    && partition.is_encrypted {
                         if let Some(mapper_name) = &partition.mapper_device {
                             use crate::app::ConfirmationOperation;
                             let part_name = partition.name.clone();
@@ -269,19 +296,15 @@ pub async fn handle_key_events(
                             app.passphrase_dialog.first_passphrase.clear();
                         }
                     }
-                }
-            }
         }
         KeyCode::Char(c) if c == config.disk.encrypt => {
-            if app.focused_block == FocusedBlock::Partitions {
-                if let Some(partition) = app.selected_partition() {
-                    if !partition.is_encrypted {
+            if app.focused_block == FocusedBlock::Partitions
+                && let Some(partition) = app.selected_partition()
+                    && !partition.is_encrypted {
                         app.format_dialog.show_dialog = true;
                         app.format_dialog.type_state.select(Some(0));
                         app.format_dialog.encrypt_mode = true;
                     }
-                }
-            }
         }
         _ => {}
     }
@@ -299,18 +322,16 @@ async fn handle_format_dialog(
             app.format_dialog.show_dialog = false;
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            if let Some(i) = app.format_dialog.type_state.selected() {
-                if i < app.filesystem_types.len() - 1 {
+            if let Some(i) = app.format_dialog.type_state.selected()
+                && i < app.filesystem_types.len() - 1 {
                     app.format_dialog.type_state.select(Some(i + 1));
                 }
-            }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            if let Some(i) = app.format_dialog.type_state.selected() {
-                if i > 0 {
+            if let Some(i) = app.format_dialog.type_state.selected()
+                && i > 0 {
                     app.format_dialog.type_state.select(Some(i - 1));
                 }
-            }
         }
         KeyCode::Enter => {
             use crate::app::ConfirmationOperation;
@@ -367,8 +388,8 @@ async fn handle_format_dialog(
                             },
                         };
                     }
-                } else if app.focused_block == FocusedBlock::Disks {
-                    if let Some(disk) = app.selected_disk() {
+                } else if app.focused_block == FocusedBlock::Disks
+                    && let Some(disk) = app.selected_disk() {
                         let disk_name = disk.device.name.clone();
                         let disk_size = format_bytes(disk.device.size);
                         let disk_model = disk
@@ -395,7 +416,6 @@ async fn handle_format_dialog(
                             },
                         };
                     }
-                }
             }
         }
         _ => {}
@@ -429,45 +449,39 @@ async fn handle_partition_dialog(
         }
         KeyCode::Char('j') | KeyCode::Down => {
             if app.partition_dialog.mode == PartitionDialogMode::SelectTableType {
-                if let Some(i) = app.partition_dialog.table_type_state.selected() {
-                    if i < app.partition_dialog.table_types.len() - 1 {
+                if let Some(i) = app.partition_dialog.table_type_state.selected()
+                    && i < app.partition_dialog.table_types.len() - 1 {
                         app.partition_dialog.table_type_state.select(Some(i + 1));
                     }
-                }
-            } else if app.partition_dialog.create_step == CreatePartitionStep::SelectFilesystem {
-                if let Some(i) = app.partition_dialog.new_partition_fs_state.selected() {
-                    if i < app.filesystem_types.len() - 1 {
+            } else if app.partition_dialog.create_step == CreatePartitionStep::SelectFilesystem
+                && let Some(i) = app.partition_dialog.new_partition_fs_state.selected()
+                    && i < app.filesystem_types.len() - 1 {
                         app.partition_dialog
                             .new_partition_fs_state
                             .select(Some(i + 1));
                     }
-                }
-            }
         }
         KeyCode::Char('k') | KeyCode::Up => {
             if app.partition_dialog.mode == PartitionDialogMode::SelectTableType {
-                if let Some(i) = app.partition_dialog.table_type_state.selected() {
-                    if i > 0 {
+                if let Some(i) = app.partition_dialog.table_type_state.selected()
+                    && i > 0 {
                         app.partition_dialog.table_type_state.select(Some(i - 1));
                     }
-                }
-            } else if app.partition_dialog.create_step == CreatePartitionStep::SelectFilesystem {
-                if let Some(i) = app.partition_dialog.new_partition_fs_state.selected() {
-                    if i > 0 {
+            } else if app.partition_dialog.create_step == CreatePartitionStep::SelectFilesystem
+                && let Some(i) = app.partition_dialog.new_partition_fs_state.selected()
+                    && i > 0 {
                         app.partition_dialog
                             .new_partition_fs_state
                             .select(Some(i - 1));
                     }
-                }
-            }
         }
         KeyCode::Enter => {
             use crate::app::ConfirmationOperation;
             use crate::utils::format_bytes;
 
             if app.partition_dialog.mode == PartitionDialogMode::SelectTableType {
-                if let Some(disk) = app.selected_disk() {
-                    if let Some(table_idx) = app.partition_dialog.table_type_state.selected() {
+                if let Some(disk) = app.selected_disk()
+                    && let Some(table_idx) = app.partition_dialog.table_type_state.selected() {
                         let disk_name = disk.device.name.clone();
                         let disk_size = format_bytes(disk.device.size);
                         let disk_model = disk
@@ -502,7 +516,6 @@ async fn handle_partition_dialog(
                             },
                         };
                     }
-                }
             } else if app.partition_dialog.mode == PartitionDialogMode::CreatePartition {
                 if app.partition_dialog.create_step == CreatePartitionStep::EnterSize {
                     app.partition_dialog.create_step = CreatePartitionStep::SelectFilesystem;
@@ -584,8 +597,8 @@ fn handle_scroll_down(app: &mut App) {
             }
         }
         FocusedBlock::Partitions => {
-            if let Some(disk) = app.selected_disk() {
-                if !disk.device.partitions.is_empty() {
+            if let Some(disk) = app.selected_disk()
+                && !disk.device.partitions.is_empty() {
                     let i = match app.partitions_state.selected() {
                         Some(i) => {
                             if i < disk.device.partitions.len() - 1 {
@@ -598,7 +611,6 @@ fn handle_scroll_down(app: &mut App) {
                     };
                     app.partitions_state.select(Some(i));
                 }
-            }
         }
         _ => {}
     }
@@ -621,15 +633,14 @@ fn handle_scroll_up(app: &mut App) {
             }
         }
         FocusedBlock::Partitions => {
-            if let Some(disk) = app.selected_disk() {
-                if !disk.device.partitions.is_empty() {
+            if let Some(disk) = app.selected_disk()
+                && !disk.device.partitions.is_empty() {
                     let i = match app.partitions_state.selected() {
                         Some(i) => i.saturating_sub(1),
                         None => 0,
                     };
                     app.partitions_state.select(Some(i));
                 }
-            }
         }
         _ => {}
     }
@@ -658,147 +669,61 @@ async fn handle_confirmation_dialog(
                 app.confirmation_dialog.operation = ConfirmationOperation::None;
                 app.confirmation_dialog.selected = 0;
 
-                match operation {
+                let request = match operation {
                     ConfirmationOperation::FormatPartition { partition, fs_type } => {
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ =
-                                format_partition(&partition, fs_type, sender_clone.clone()).await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                        Some(Request::Format {
+                            device: partition,
+                            fs_type: fs_type.to_string(),
+                        })
                     }
                     ConfirmationOperation::FormatDisk { disk, fs_type } => {
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = format_whole_disk(&disk, fs_type, sender_clone.clone()).await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                        Some(Request::FormatWholeDisk {
+                            disk,
+                            fs_type: fs_type.to_string(),
+                        })
                     }
                     ConfirmationOperation::DeletePartition { partition } => {
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = delete_partition(&partition, &sender_clone).await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                        Some(Request::DeletePartition { partition })
                     }
                     ConfirmationOperation::CreatePartitionTable { disk, table_type } => {
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = create_partition_table(&disk, &table_type, &sender_clone).await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                        Some(Request::CreatePartitionTable { disk, table_type })
                     }
-                    ConfirmationOperation::CreatePartition {
-                        disk,
-                        size,
-                        fs_type,
-                    } => {
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = create_partition_with_fs(&disk, &size, fs_type, &sender_clone)
-                                .await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                    ConfirmationOperation::CreatePartition { disk, size, fs_type } => {
+                        Some(Request::CreatePartition {
+                            disk,
+                            size,
+                            fs_type: Some(fs_type.to_string()),
+                        })
                     }
-                    ConfirmationOperation::ResizePartition {
-                        partition,
-                        new_size,
-                    } => {
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = resize_partition_and_filesystem(&partition, &new_size, &sender_clone)
-                                .await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                    ConfirmationOperation::ResizePartition { partition, new_size } => {
+                        Some(Request::ResizePartition { partition, new_size })
                     }
                     ConfirmationOperation::LockLuksDevice { mapper_name } => {
-                        use crate::operations::lock_luks_device;
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = lock_luks_device(&mapper_name, &sender_clone).await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                        Some(Request::LockLuks { mapper_name })
                     }
                     ConfirmationOperation::EncryptPartition { partition, fs_type } => {
-                        use crate::operations::encrypt_and_format_partition;
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-
                         let passphrase = app.passphrase_dialog.first_passphrase.clone();
                         app.passphrase_dialog.first_passphrase.clear();
                         app.passphrase_dialog.filesystem_type = None;
-
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = encrypt_and_format_partition(&partition, &passphrase, fs_type, &sender_clone).await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                        Some(Request::EncryptAndFormat {
+                            partition,
+                            passphrase,
+                            fs_type: fs_type.to_string(),
+                        })
                     }
                     ConfirmationOperation::UnlockLuksDevice { device, mapper_name } => {
-                        use crate::operations::unlock_luks_device;
-                        if check_operation_in_progress(app, &sender) {
-                            return Ok(());
-                        }
-
                         let passphrase = app.passphrase_dialog.first_passphrase.clone();
                         app.passphrase_dialog.first_passphrase.clear();
-
-                        app.operation_in_progress.store(true, Ordering::Release);
-                        let sender_clone = sender.clone();
-                        let operation_flag = app.operation_in_progress.clone();
-                        tokio::spawn(async move {
-                            let _ = unlock_luks_device(&device, &passphrase, &mapper_name, &sender_clone).await;
-                            let _ = sender_clone.send(Event::Refresh);
-                            operation_flag.store(false, Ordering::Release);
-                        });
+                        Some(Request::UnlockLuks {
+                            device,
+                            passphrase,
+                            mapper_name,
+                        })
                     }
-                    ConfirmationOperation::None => {}
+                    ConfirmationOperation::None => None,
+                };
+                if let Some(req) = request {
+                    spawn_helper_operation(app, &sender, req);
                 }
             } else {
                 app.confirmation_dialog.show_dialog = false;
@@ -874,7 +799,6 @@ async fn handle_passphrase_dialog(
     sender: UnboundedSender<Event>,
 ) -> AppResult<()> {
     use crate::app::PassphraseOperation;
-    use crate::operations::unlock_luks_device;
 
     match key_event.code {
         KeyCode::Esc => {
@@ -903,19 +827,8 @@ async fn handle_passphrase_dialog(
                     app.passphrase_dialog.show_dialog = false;
                     app.passphrase_dialog.input = tui_input::Input::default();
 
-                    if check_operation_in_progress(app, &sender) {
-                        return Ok(());
-                    }
-
-                    app.operation_in_progress.store(true, Ordering::Release);
-                    let sender_clone = sender.clone();
-                    let operation_flag = app.operation_in_progress.clone();
-
-                    tokio::spawn(async move {
-                        let _ = unlock_luks_device(&device, &passphrase, &mapper_name, &sender_clone).await;
-                        let _ = sender_clone.send(Event::Refresh);
-                        operation_flag.store(false, Ordering::Release);
-                    });
+                    let request = Request::UnlockLuks { device, passphrase, mapper_name };
+                    spawn_helper_operation(app, &sender, request);
                 }
                 PassphraseOperation::Encrypt | PassphraseOperation::EncryptConfirm => {
                     if passphrase.is_empty() {

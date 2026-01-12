@@ -6,6 +6,7 @@ pub mod handler;
 pub mod notification;
 pub mod operations;
 pub mod partition;
+pub mod protocol;
 pub mod theme;
 pub mod tui;
 pub mod ui;

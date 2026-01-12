@@ -1,6 +1,6 @@
 [package]
 name = "disktui"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 authors = ["Maciej <macrionyn@proton.me>"]
 description = "A terminal-based disk management utility built with Rust and Ratatui"
@@ -22,6 +22,14 @@ serde_json = "1"
 tui-input = "0.14"
 libc = "0.2"
 dirs = "6"
+
+[[bin]]
+name = "disktui"
+path = "src/main.rs"
+
+[[bin]]
+name = "disktui-helper"
+path = "src/bin/disktui-helper.rs"
 
 [profile.release]
 strip = true

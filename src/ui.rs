@@ -967,7 +967,7 @@ fn render_progress_dialog(app: &App, frame: &mut Frame) {
 fn render_confirmation_dialog(app: &mut App, frame: &mut Frame) {
     // Calculate dialog height based on content
     let details_count = app.confirmation_dialog.details.len();
-    let dialog_height = 10 + details_count as u16 * 1;
+    let dialog_height = 10 + details_count as u16;
 
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
